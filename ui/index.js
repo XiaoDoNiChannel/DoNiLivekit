@@ -537,7 +537,7 @@ async function initRustMicPipeline(sampleRate, wsUrl = 'ws://127.0.0.1:9002') {
             numberOfOutputs: 1,
             outputChannelCount: [1],
             processorOptions: {
-                capacityFrames: resolvedSampleRate * 10
+                capacityFrames: resolvedSampleRate * 0.2 // 200ms 缓冲，降低延迟
             }
         });
 
@@ -709,7 +709,7 @@ async function initLocalPcmPipeline(sampleRate, wsUrl = 'ws://127.0.0.1:9001') {
             numberOfOutputs: 1,
             outputChannelCount: [1],
             processorOptions: {
-                capacityFrames: resolvedSampleRate * 10
+                capacityFrames: resolvedSampleRate * 0.4 // 400ms 缓冲，降低丢包风险
             }
         });
 

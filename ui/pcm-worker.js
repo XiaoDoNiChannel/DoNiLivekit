@@ -2,7 +2,7 @@ class PcmRingBufferProcessor extends AudioWorkletProcessor {
     constructor(options) {
         super();
         const configured = Number(options?.processorOptions?.capacityFrames);
-        const capacityFrames = Number.isFinite(configured) && configured > 1024 ? configured : 48000 * 10;
+        const capacityFrames = Number.isFinite(configured) && configured > 1024 ? configured : 48000 * 0.4;
         this.capacity = capacityFrames;
         this.buffer = new Float32Array(this.capacity);
         this.readIndex = 0;

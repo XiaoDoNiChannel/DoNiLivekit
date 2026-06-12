@@ -1399,9 +1399,17 @@ fn run_mic_capture(
                         gated_data
                     };
 
-                    if pcm_tx.blocking_send(payload).is_err() {
-                        should_stop = true;
-                        break;
+                    // 非阻塞发送
+                    match pcm_tx.try_send(payload) {
+                        Ok(()) => {} // 发送成功
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            // 通道满了，直接丢弃当前帧，绝不阻塞采集线程
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            // 只有前端 WebSocket 真正断开时，才停止采集
+                            should_stop = true;
+                            break;
+                        }
                     }
                 }
             }
