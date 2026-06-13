@@ -1,3 +1,5 @@
+import { logError } from '../shared/errors.js';
+
 /**
  * 远端音频路由与音量模块。
  *
@@ -34,6 +36,7 @@ export function createRemoteAudioFeature(context) {
             audioEl.__trackSid = track.sid;
             gainNode.gain.value = gain;
         } catch (e) {
+            logError('remoteAudio/addRemoteGainNode 创建 GainNode 路由失败，回退到 audio.volume', e, 'warn');
             audioEl.volume = Math.max(0, Math.min(gain, 1));
             return;
         }

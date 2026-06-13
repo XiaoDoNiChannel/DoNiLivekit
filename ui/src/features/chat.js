@@ -1,3 +1,5 @@
+import { logError } from '../shared/errors.js';
+
 /**
  * 聊天模块。
  *
@@ -21,7 +23,7 @@ export function createChatFeature(context) {
             renderChatMessage(myName, text, true);
             input.value = '';
         } catch (e) {
-            console.error('发送消息失败:', e);
+            logError('chat/sendChatMessage 发送消息失败', e);
         }
     }
 

@@ -1,4 +1,8 @@
 import { USER_VOLUME_STORAGE_KEY } from '../shared/constants.js';
+import { logError } from '../shared/errors.js';
+
+// Participant volume values are normalized as gain values in the range 0~3.
+// UI sliders use 0~300 percent, so normalizeGainValue accepts both formats.
 
 export function normalizeGainValue(rawValue) {
     const n = Number(rawValue);
@@ -39,7 +43,7 @@ export function loadUserVolumesFromStorage() {
 
         return normalized;
     } catch (e) {
-        console.warn('读取成员音量设置失败，使用默认音量:', e);
+        logError('participantVolumes/loadUserVolumesFromStorage 读取成员音量设置失败，使用默认音量', e, 'warn');
         return {};
     }
 }
@@ -48,7 +52,7 @@ export function saveUserVolumesToStorage(userVolumes) {
     try {
         localStorage.setItem(USER_VOLUME_STORAGE_KEY, JSON.stringify(userVolumes));
     } catch (e) {
-        console.warn('保存成员音量设置失败:', e);
+        logError('participantVolumes/saveUserVolumesToStorage 保存成员音量设置失败', e, 'warn');
     }
 }
 

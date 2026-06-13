@@ -1,5 +1,9 @@
 <script setup>
 import { nextTick, onMounted } from 'vue';
+import SidebarPanel from './components/sidebar/SidebarPanel.vue';
+import MainStage from './components/main/MainStage.vue';
+import AppAudioModal from './components/modals/AppAudioModal.vue';
+import ChatPanel from './components/chat/ChatPanel.vue';
 import {
   initLegacyDom,
   joinRoom,
@@ -14,148 +18,36 @@ import {
   closeAppAudioModal,
   confirmAppAudioSelection,
   sendChatMessage,
-} from './legacy/client.js';
+} from './app/runtime.js';
 
+// App.vue 只负责页面骨架和事件转发。
+// 运行时统一放在 app/runtime.js；业务模块放在 features/；状态模型放在 stores/。
+// 这里不直接写 LiveKit / Tauri / AudioWorklet 逻辑，方便后续继续升级 Discord-like UI。
 onMounted(async () => {
   await nextTick();
   initLegacyDom();
 });
 </script>
 
-
 <template>
-<div id="sidebar">
-        <div class="sidebar-title">📡 频道登录</div>
-        <div class="input-group" id="login-section">
-            <input type="text" id="server-ip" placeholder="服务器IP:端口，例如 10.126.126.10:5000">
-            <input type="text" id="username" placeholder="请输入你的开黑昵称...">
-            <button id="btn-connect" class="primary-btn" @click="joinRoom">进入大厅</button>
-        </div>
-        <div class="section-title-row">
-            <div class="sidebar-title" style="margin: 0;">🔊 语音分组</div>
-            <button class="tiny-btn" @click="createChannel" title="创建频道">+</button>
-        </div>
-        <div id="channel-list"></div>
-        <div class="sidebar-title" style="margin-top: 10px;">👥 在线成员 (<span id="user-count">0</span>)</div>
-        <div id="participant-list">
-            <div style="font-size: 12px; color: #80848e; text-align: center; margin-top: 20px;">加入频道后显示在线人员</div>
-        </div>
-        
-        <div class="vad-container" id="vad-module" style="display: none; margin: 15px 0; padding: 15px; background: #1e1f22; border-radius: 8px; border: 1px solid #3b3d44;">
-            <div style="display: flex; justify-content: space-between; font-size: 12px; color: #b5bac1; margin-bottom: 12px; font-weight: 600;">
-                <span>收音阈值（点击监听预览） </span>
-                <span id="vad-threshold-text">20%</span>
-            </div>
-            <div style="position: relative; height: 16px; background: #313338; border-radius: 8px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);">
-                <div id="vad-fill-bar" style="height: 100%; width: 0%; background: #23a559; border-radius: 8px; transition: width 0.05s linear;"></div>
-                <div id="vad-threshold-marker" style="position: absolute; top: -2px; bottom: -2px; width: 3px; background: #faa61a; box-shadow: 0 0 6px #faa61a; z-index: 2; pointer-events: none; left: 20%;"></div>
-                <input type="range" id="vad-slider-input" min="0" max="100" value="20" style="position: absolute; top: -4px; left: 0; width: 100%; height: 24px; margin: 0; opacity: 0; z-index: 3; cursor: pointer;">
-            </div>
+  <SidebarPanel
+    @join-room="joinRoom"
+    @create-channel="createChannel"
+    @switch-mic="switchMic"
+    @switch-output="switchAudioOutput"
+    @toggle-mic="toggleMic"
+    @toggle-monitor="toggleMicMonitor"
+    @toggle-screen="toggleScreen"
+    @app-audio-click="handleAppAudioClick"
+    @leave="leaveRoom"
+  />
 
-            <div style="display: flex; justify-content: space-between; font-size: 12px; color: #b5bac1; margin-top: 20px; margin-bottom: 12px; font-weight: 600;">
-                <span>麦克风增益（默认5.0）</span>
-                <span id="vad-boost-text">5.0x</span>
-            </div>
-            <div style="position: relative; height: 16px;">
-                <input type="range" id="vad-boost-input" class="volume-slider" min="10" max="200" value="50" style="width: 100%; cursor: pointer;">
-            </div>
-        </div>
+  <MainStage />
 
-        <!-- ========================================== -->
-        <!-- 🌟 方案一：左下角个人控制坞 (Discord 风格) -->
-        <!-- ========================================== -->
-        <div id="user-control-panel">
-            
-            <!-- 实用功能：麦克风与扬声器切换 (内联样式保证暗黑风格兼容) -->
-            <div class="device-selectors" style="display: flex; flex-direction: column; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); margin-bottom: 10px;">
-                <select id="mic-select" @change="switchMic($event.target.value)" disabled style="width: 100%; background: #1e1f22; color: #dbdee1; border: 1px solid #3b3d44; padding: 6px; border-radius: 6px; font-size: 12px; outline: none; cursor: pointer;">
-                    <option value="">等待权限...</option>
-                </select>
-                <select id="audio-output-select" @change="switchAudioOutput($event.target.value)" disabled style="width: 100%; background: #1e1f22; color: #dbdee1; border: 1px solid #3b3d44; padding: 6px; border-radius: 6px; font-size: 12px; outline: none; cursor: pointer;">
-                    <option value="default">默认扬声器</option>
-                </select>
-            </div>
+  <AppAudioModal
+    @close="closeAppAudioModal"
+    @confirm="confirmAppAudioSelection"
+  />
 
-            <!-- 用户名片展示 -->
-            <div class="user-profile">
-                <div class="avatar">🎮</div>
-                <div class="info">
-                    <div class="name" id="ui-username">未连接大厅</div>
-                    <div class="status" id="ui-status">等待加入房间</div>
-                </div>
-            </div>
-
-            <!-- 操作矩阵：自带悬浮说明 (Title) 的高能按钮组 -->
-            <div class="action-grid">
-                <button id="btn-mic" class="grid-btn" @click="toggleMic" disabled data-tooltip="开启麦克风">🎤</button>
-                <button id="btn-mic-monitor" class="grid-btn" @click="toggleMicMonitor" style="display: none;" data-tooltip="监听耳返">🎧</button>
-                
-                <div class="screen-btn-wrapper">
-                    <button id="btn-screen" class="grid-btn" @click="toggleScreen" disabled>💻</button>
-                    <div class="screen-settings-popup">
-                        <div class="popup-title">💻 共享画质设置</div>
-                        <select id="screen-res" disabled>
-                            <option value="1280x720">720P (流畅)</option>
-                            <option value="1920x1080" selected>1080P (高清)</option>
-                            <option value="2560x1440">2K (超清)</option>
-                        </select>
-                        <div style="display: flex; gap: 8px;">
-                            <select id="screen-fps" disabled style="flex: 1;">
-                                <option value="30" selected>30 FPS</option>
-                                <option value="60">60 FPS</option>
-                            </select>
-                            <select id="screen-bitrate" disabled style="flex: 1;">
-                                <option value="2500">2.5 Mbps</option>
-                                <option value="5000" selected>5.0 Mbps</option>
-                                <option value="8000">8.0 Mbps</option>
-                                <option value="15000">15.0 Mbps</option>
-                                <option value="20000">20.0 Mbps</option>
-                                <option value="25000">25.0 Mbps</option>
-                                <option value="30000">30.0 Mbps</option>
-                            </select>
-                        </div>
-                    </div>
-                </div>
-
-                <button id="btn-app-audio" class="grid-btn" @click="handleAppAudioClick" disabled data-tooltip="共享应用音频">🎵</button>
-                <button id="btn-leave" class="grid-btn danger-btn" @click="leaveRoom" style="display: none;" data-tooltip="断开连接">🚪</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="main-area">
-        <div id="header"># 🎮 直播与共享大厅</div>
-        <div id="video-container"></div>
-        <div id="audio-container"></div>
-        <div id="local-screen-preview-box">
-            <div id="local-screen-preview-title">本地屏幕预览（静音）</div>
-            <video id="local-screen-preview" muted autoplay playsinline></video>
-        </div>
-        <!-- 💡 这里原本臃肿的控件已被彻底拔除，视频容器享受绝对的全屏沉浸体验 -->
-    </div>
-
-    <div id="app-audio-modal" class="modal hidden" @click="closeAppAudioModal($event)">
-        <div class="modal-card" @click.stop>
-            <div class="modal-header">
-                <div class="modal-title">🎯 选择要共享音频的应用</div>
-                <button class="modal-close" @click="closeAppAudioModal()">✕</button>
-            </div>
-            <div class="modal-subtitle">仅展示可识别名称的活跃进程，点击后将开始截流并推送到房间。</div>
-            <div id="app-audio-process-list" class="modal-list"></div>
-            <div class="modal-footer">
-                <button id="btn-confirm-app-audio" class="primary-btn" @click="confirmAppAudioSelection">开始共享所选应用</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="chat-panel">
-        <div class="chat-header">💬 局域网聊天</div>
-        <div id="chat-messages">
-            <div style="font-size: 12px; color: #80848e; text-align: center; margin-top: 10px;">欢迎来到聊天室</div>
-        </div>
-        <div class="chat-input-area">
-            <input type="text" id="chat-input" placeholder="输入消息..." @keydown.enter="sendChatMessage" disabled>
-            <button id="btn-send" @click="sendChatMessage" disabled>发送</button>
-        </div>
-    </div>
+  <ChatPanel @send="sendChatMessage" />
 </template>

@@ -1,3 +1,5 @@
+import { alertError, logError } from '../shared/errors.js';
+
 /**
  * 屏幕共享模块。
  *
@@ -174,7 +176,7 @@ export function createScreenShareFeature(context) {
                 console.log(`[ScreenShare Stats] 目标码率=${targetText}，实际码率=${(actualBps / 1000000).toFixed(2)} Mbps`);
             }
         } catch (err) {
-            console.warn('[ScreenShare Stats] 读取RTC stats失败:', err);
+            logError('screenShare/logCurrentScreenBitrate 读取 RTC stats 失败', err, 'warn');
         }
     }
 
@@ -219,7 +221,7 @@ export function createScreenShareFeature(context) {
                 try {
                     await room.localParticipant.setScreenShareEnabled(true, captureOptions, publishOptions);
                 } catch (err) {
-                    console.error('抓取屏幕音视频流失败:', err);
+                    logError('screenShare/toggleScreen 抓取屏幕音视频流失败，准备降级为仅画面共享', err);
                     audioShareFailed = true;
                     audioShareError = err;
 
@@ -290,13 +292,14 @@ export function createScreenShareFeature(context) {
                 document.getElementById('screen-bitrate').disabled = false;
             }
         } catch (e) {
-            console.error('屏幕共享未知错误', e);
+            logError('screenShare/toggleScreen 屏幕共享流程失败', e);
             context.setIsScreenOn(false);
             stopScreenBitrateMonitor();
             hideLocalScreenPreview();
             document.getElementById('screen-res').disabled = false;
             document.getElementById('screen-fps').disabled = false;
             document.getElementById('screen-bitrate').disabled = false;
+            alertError('屏幕共享失败', e, '请检查屏幕共享权限、浏览器能力和 LiveKit 连接状态。');
         }
     }
 

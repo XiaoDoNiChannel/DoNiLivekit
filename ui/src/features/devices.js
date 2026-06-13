@@ -1,3 +1,10 @@
+import { alertError, getErrorMessage, logError } from '../shared/errors.js';
+
+/**
+ * Return a user-friendly microphone name.
+ * Windows endpoint IDs are long and unreadable, so only fall back to generic names
+ * when the value looks like an endpoint id instead of a real device label.
+ */
 export function getCleanMicDeviceLabel(device, index) {
     const rawName = String(device?.name || '').trim();
 
@@ -44,8 +51,8 @@ export async function updateMicList({ isTauriClient, invoke, LivekitClient }) {
             selectEl.value = hasSaved ? savedMic : '';
 
             // 关键：开麦前先把选择同步给 Rust。否则 Rust 仍会录系统默认麦克风。
-            await invoke('set_rust_mic_device_id', { deviceId: selectEl.value }).catch((e) => {
-                console.warn('同步 Rust 麦克风设备失败:', e);
+            await invoke('set_rust_mic_device_id', { deviceId: selectEl.value }).catch((error) => {
+                logError('devices/updateMicList 同步 Rust 麦克风设备失败', error, 'warn');
             });
             return;
         }
@@ -68,8 +75,8 @@ export async function updateMicList({ isTauriClient, invoke, LivekitClient }) {
             selectEl.value = savedMic;
         }
     } catch (e) {
-        console.error('获取麦克风列表失败:', e);
-        selectEl.innerHTML = '<option value="">麦克风列表获取失败</option>';
+        logError('devices/updateMicList 获取麦克风列表失败', e);
+        selectEl.innerHTML = `<option value="">麦克风列表获取失败：${getErrorMessage(e)}</option>`;
     }
 }
 
@@ -107,8 +114,8 @@ export async function switchMic(deviceId, context) {
                 afterRustMicRestart?.();
             }
         } catch (e) {
-            console.error('切换 Rust 麦克风失败:', e);
-            alert(`切换麦克风失败：${e.message || e}`);
+            logError('devices/switchMic 切换 Rust 麦克风失败', e);
+            alertError('切换麦克风失败', e, '设备可能被其他程序独占，或 Rust 麦克风采集线程重启失败。');
         }
 
         return;
@@ -120,8 +127,8 @@ export async function switchMic(deviceId, context) {
     try {
         await room.switchActiveDevice('audioinput', deviceId);
     } catch (e) {
-        console.error('切换麦克风失败:', e);
-        alert('切换失败，该设备可能被独占或拔出。');
+        logError('devices/switchMic 切换浏览器麦克风失败', e);
+        alertError('切换麦克风失败', e, '设备可能被独占、拔出，或浏览器没有麦克风权限。');
     }
 }
 
@@ -153,7 +160,7 @@ export async function updateAudioOutputList({ selectedAudioOutputId }) {
         const hasSaved = Array.from(selectEl.options).some(opt => opt.value === selectedAudioOutputId);
         selectEl.value = hasSaved ? selectedAudioOutputId : 'default';
     } catch (e) {
-        console.warn('枚举音频输出设备失败:', e);
+        logError('devices/updateAudioOutputList 枚举音频输出设备失败', e, 'warn');
         selectEl.innerHTML = '<option value="default">输出设备不可用</option>';
     }
 }
@@ -167,7 +174,7 @@ export async function switchAudioOutput(deviceId, context) {
         try {
             await remoteAudioContext.setSinkId(selectedAudioOutputId);
         } catch (e) {
-            console.warn('AudioContext.setSinkId 切换失败:', e);
+            logError('devices/switchAudioOutput 切换远端 AudioContext 输出设备失败', e, 'warn');
         }
     }
 
@@ -176,7 +183,7 @@ export async function switchAudioOutput(deviceId, context) {
         try {
             await localRustMicAudioContext.setSinkId(selectedAudioOutputId);
         } catch (e) {
-            console.warn('Rust麦克风耳返 setSinkId 切换失败:', e);
+            logError('devices/switchAudioOutput 切换 Rust 麦克风耳返输出设备失败', e, 'warn');
         }
     }
 
@@ -186,7 +193,7 @@ export async function switchAudioOutput(deviceId, context) {
             try {
                 await audioEl.setSinkId(selectedAudioOutputId);
             } catch (e) {
-                console.warn('audio.setSinkId 切换失败:', e);
+                logError('devices/switchAudioOutput 切换 audio 元素输出设备失败', e, 'warn');
             }
         }
     }

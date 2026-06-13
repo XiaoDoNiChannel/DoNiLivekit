@@ -1,8 +1,10 @@
+import { alertError, formatError, getErrorMessage, logError } from '../shared/errors.js';
+
 /**
  * 应用音频共享模块。
  *
- * 这个模块只负责“选择进程 -> 启动 Rust 9001 应用音频采集 -> 发布 LiveKit 音轨”。
- * 它不直接保存 LiveKit 房间状态，而是通过 context 读写 client.js 里的稳定状态，避免一次重构破坏 9001/LiveKit 链路。
+ * 负责从 Rust 9001 获取指定进程的 PCM 音频，并发布为 LiveKit `app-audio` track。
+ * 本模块不保存房间状态；房间、publication、AudioWorklet 管线均由 runtime 通过 context 注入。
  */
 
 function sleep(ms) {
@@ -22,7 +24,7 @@ async function startCaptureWithRetry(invoke, pid, maxAttempts = 8, intervalMs = 
             await sleep(intervalMs);
         }
     }
-    throw lastError || new Error('start_capture 失败');
+    throw new Error(formatError(`启动应用音频采集失败(pid=${pid})`, lastError));
 }
 
 async function startCaptureMultiWithRetry(invoke, pids, maxAttempts = 8, intervalMs = 150) {
@@ -38,7 +40,7 @@ async function startCaptureMultiWithRetry(invoke, pids, maxAttempts = 8, interva
             await sleep(intervalMs);
         }
     }
-    throw lastError || new Error('start_capture_multi 失败');
+    throw new Error(formatError(`启动多应用音频采集失败(pids=${pids.join(',')})`, lastError));
 }
 
 export function createAppAudioFeature(context) {
@@ -116,8 +118,8 @@ export function createAppAudioFeature(context) {
                 `;
             }).join('');
         } catch (error) {
-            console.error('获取活跃进程失败:', error);
-            listEl.innerHTML = `<div class="modal-empty">获取进程列表失败：${context.sanitizeText(error?.message || String(error))}</div>`;
+            logError('appAudio/openAppAudioModal 获取活跃进程失败', error);
+            listEl.innerHTML = `<div class="modal-empty">获取进程列表失败：${context.sanitizeText(getErrorMessage(error))}</div>`;
         }
     }
 
@@ -165,7 +167,7 @@ export function createAppAudioFeature(context) {
                 : await startCaptureMultiWithRetry(context.invoke, pids);
 
             const track = await context.initLocalPcmPipeline(realSampleRate);
-            if (!track) throw new Error('未拿到 localPcmTrack');
+            if (!track) throw new Error('应用音频管线未返回 MediaStreamTrack，请检查 9001 WebSocket 与 AudioWorklet 初始化。');
 
             // Rust 9001 刚启动时给一点缓冲，避免发布瞬间远端收到空音频。
             await sleep(500);
@@ -176,8 +178,8 @@ export function createAppAudioFeature(context) {
             updateAppAudioButtons();
             closeAppAudioModal();
         } catch (error) {
-            console.error('共享应用音频失败:', error);
-            alert(`共享应用音频失败：${error?.message || error}`);
+            logError('appAudio/confirmAppAudioSelection 共享应用音频失败', error);
+            alertError('共享应用音频失败', error);
             context.setIsAppAudioSharing(false);
             updateAppAudioButtons();
         }
@@ -191,7 +193,7 @@ export function createAppAudioFeature(context) {
                 await room.localParticipant.unpublishTrack(publication.track);
             }
         } catch (error) {
-            console.warn('停止应用音频发布失败:', error);
+            logError('appAudio/stopAppAudioShare 停止应用音频发布失败', error, 'warn');
         } finally {
             context.setLocalAppAudioPublication(null);
             context.setIsAppAudioSharing(false);
