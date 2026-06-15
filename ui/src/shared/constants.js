@@ -2,7 +2,7 @@
 // 只被单个模块使用的配置，应优先留在对应模块内部。
 
 // 默认后端地址：token/API 服务端口。LiveKit WebSocket 端口在 roomConnection.js 中拼接为 7880。
-export const DEFAULT_SERVER_IP = '10.126.126.10:5000';
+export const DEFAULT_SERVER_IP = '127.0.0.1:5000';
 
 // 进入大厅后是否自动加入第一个语音频道。
 export const AUTO_JOIN_FIRST_CHANNEL_AFTER_LOBBY = true;

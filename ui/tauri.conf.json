@@ -39,7 +39,7 @@
 "plugins": {
     "updater": {
       "endpoints": [
-        "http://10.126.126.10:5000/update.json"
+        "http://127.0.0.1:5000/update.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ3Q0Q1Njc5NkRGNzcyRDQKUldUVWN2ZHRlVmJOMXpPWHhsaWl4cWRkNTBKTk4vMFhHaHRNMG1vMXo3M0JmbkU0dmF1Uy9nTHMK"
     }

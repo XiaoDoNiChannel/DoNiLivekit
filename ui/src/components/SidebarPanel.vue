@@ -21,7 +21,7 @@ defineEmits([
   <aside id="sidebar">
     <div class="sidebar-title">📡 频道登录</div>
     <div id="login-section" class="input-group">
-      <input id="server-ip" type="text" placeholder="服务器IP:端口，例如 10.126.126.10:5000">
+      <input id="server-ip" type="text" placeholder="服务器IP:端口，例如 127.0.0.1:5000">
       <input id="username" type="text" placeholder="请输入你的开黑昵称...">
       <button id="btn-connect" class="primary-btn" @click="$emit('join-room')">进入大厅</button>
     </div>

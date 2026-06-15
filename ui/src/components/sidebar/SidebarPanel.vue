@@ -29,7 +29,7 @@ defineEmits([
     <div class="sidebar-scroll-area">
       <section id="login-section" class="login-card">
         <div class="section-label">连接信息</div>
-        <input id="server-ip" type="text" placeholder="服务器IP:端口，例如 10.126.126.10:5000">
+        <input id="server-ip" type="text" placeholder="服务器IP:端口，例如 127.0.0.1:5000">
         <input id="username" type="text" placeholder="请输入你的开黑昵称...">
         <button id="btn-connect" class="primary-btn" @click="$emit('join-room')">进入大厅</button>
       </section>
