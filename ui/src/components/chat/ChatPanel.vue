@@ -234,6 +234,26 @@ function isMineReaction(reactions, emoji) {
   return (reactions?.[emoji] || []).includes(myId);
 }
 
+function getReactionUserNames(userIds) {
+  if (!Array.isArray(userIds)) return '';
+  const myId = getSelfReactionId();
+  
+  return userIds.map(id => {
+    if (id === myId) return '你';
+    
+    // 优先从在线列表查找昵称
+    const p = presenceStore.participants[id];
+    if (p && p.displayName) return p.displayName;
+    
+    // 其次从当前聊天记录中提取发过的消息查找名字
+    const msg = chatStore.messages.find(m => m.senderId === id);
+    if (msg && msg.senderName) return msg.senderName;
+    
+    // 兜底：取 uuid 前的部分（通常是名字-uuid 格式）
+    return id.includes('-') ? id.split('-')[0] : '某人';
+  }).join(', ');
+}
+
 // ─── 富文本渲染 ───────────────────────────────────────────────────────────────
 function renderContent(content) {
   return renderMessageContent(content);
@@ -334,7 +354,7 @@ function formatFullTime(ts) {
               :class="isMineReaction(msg.reactions, emoji)
                 ? 'bg-[#5865f2]/20 border-[#5865f2]/60 text-[#5865f2]'
                 : 'bg-white/5 border-white/10 text-[#b5bac1] hover:bg-white/10 hover:border-white/20'"
-              :title="`${users.join(', ')} 回应了 ${emoji}`"
+              :title="`${getReactionUserNames(users)} 回应了 ${emoji}`"
               @click="handleReaction(msg.id, emoji)"
             >
               <span>{{ emoji }}</span>
