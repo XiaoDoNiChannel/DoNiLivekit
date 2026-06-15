@@ -82,6 +82,12 @@ UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
 MAX_AVATAR_UPLOAD_BYTES = 10 * 1024 * 1024
 ALLOWED_AVATAR_MIME_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 ALLOWED_AVATAR_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif"}
+
+# 聊天图片上传：原图保存，前端只负责显示缩略尺寸。后续可增加服务端缩略图。
+MAX_CHAT_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024
+ALLOWED_CHAT_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+ALLOWED_CHAT_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif"}
+
 AVATAR_HISTORY_LIMIT_PER_USER = 12
 # 设置 DONICHANNEL_ADMIN_TOKEN 后，清空全部聊天记录必须带 X-Admin-Token 或 adminToken。
 CHAT_ADMIN_TOKEN = os.environ.get("DONICHANNEL_ADMIN_TOKEN", "").strip()
@@ -1346,6 +1352,27 @@ async def post_reaction(body: dict = Body(default_factory=dict)):
 
 
 
+
+
+def _safe_chat_channel_dir(channel_id: str) -> str:
+    """把频道名转成安全目录名，聊天图片按频道分目录保存。"""
+    value = re.sub(r"[^a-zA-Z0-9_-]", "_", str(channel_id or "lobby")).strip("_")
+    return (value or "lobby")[:80]
+
+
+def _upload_ext_from_mime(filename_orig: str, content_type: str, allowed_exts: set[str]) -> str:
+    """根据原文件名和 MIME 推断安全扩展名。"""
+    ext = filename_orig.rsplit(".", 1)[-1].lower() if "." in filename_orig else ""
+    mime_default_ext = {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+        "image/gif": "gif",
+    }.get(content_type, "png")
+    if ext not in allowed_exts:
+        ext = mime_default_ext
+    return ext
+
 def _safe_avatar_user_dir(user_id: str) -> str:
     """把 userId 转成安全目录名，保证每个用户的头像文件放在独立子目录。"""
     value = re.sub(r"[^a-zA-Z0-9_-]", "_", str(user_id or "anonymous")).strip("_")
@@ -1555,6 +1582,54 @@ async def upload_avatar(file: UploadFile = File(...), userId: Optional[str] = Fo
         "ok": True,
         "url": avatar_url,
         "avatarUrl": avatar_url,
+        "sizeBytes": len(content),
+        "contentType": content_type,
+    }
+
+
+@app.post("/api/upload/chat-image")
+async def upload_chat_image(
+    file: UploadFile = File(...),
+    channelId: Optional[str] = Form(None),
+    userId: Optional[str] = Form(None),
+):
+    """上传聊天图片，返回可直接插入消息的图片 URL。
+
+    聊天图片按频道保存：uploads/chat/<channelId>/<uuid>.<ext>。
+    userId 仅用于后续审计/扩展，目前不进入文件名，避免泄漏身份。
+    """
+    content_type = (file.content_type or "").lower().split(";")[0].strip()
+    if content_type not in ALLOWED_CHAT_IMAGE_MIME_TYPES:
+        raise HTTPException(status_code=400, detail="只允许上传 png/jpg/jpeg/webp/gif 图片")
+
+    ext = _upload_ext_from_mime(file.filename or "", content_type, ALLOWED_CHAT_IMAGE_EXTENSIONS)
+
+    content = await file.read(MAX_CHAT_IMAGE_UPLOAD_BYTES + 1)
+    if len(content) > MAX_CHAT_IMAGE_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="聊天图片不能超过 20MB")
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+
+    safe_channel = _safe_chat_channel_dir(channelId or "lobby")
+    chat_dir = os.path.abspath(os.path.join(UPLOADS_DIR, "chat", safe_channel))
+    uploads_abs = os.path.abspath(UPLOADS_DIR)
+    if not chat_dir.startswith(uploads_abs):
+        raise HTTPException(status_code=400, detail="非法上传目录")
+    os.makedirs(chat_dir, exist_ok=True)
+
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    filepath = os.path.abspath(os.path.join(chat_dir, filename))
+    if not filepath.startswith(chat_dir):
+        raise HTTPException(status_code=400, detail="非法文件路径")
+
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    image_url = f"/uploads/chat/{safe_channel}/{filename}"
+    return {
+        "ok": True,
+        "url": image_url,
+        "imageUrl": image_url,
         "sizeBytes": len(content),
         "contentType": content_type,
     }

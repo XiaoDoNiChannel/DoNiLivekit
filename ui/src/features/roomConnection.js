@@ -385,6 +385,7 @@ export function createRoomConnectionFeature(context) {
 
             context.livekitEvents.registerRoomEvents(nextRoom);
             await nextRoom.connect(serverConfig.livekitWs, data.token);
+            currentChannel = targetRoomName;
             context.setRoom(nextRoom);
         } catch (error) {
             logError('roomConnection/connectToChannel LiveKit 核心连接失败', error);

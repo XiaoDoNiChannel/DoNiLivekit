@@ -182,6 +182,40 @@ export async function uploadAvatar(file, { userId } = {}) {
   return res.json();
 }
 
+
+/**
+ * 上传聊天图片到服务器。
+ * @param {File} file - 图片文件
+ * @param {{ channelId?: string, userId?: string }} [opts]
+ * @returns {Promise<{ ok: boolean, url: string, imageUrl: string, sizeBytes?: number, contentType?: string }>}
+ */
+export async function uploadChatImage(file, { channelId, userId } = {}) {
+  const base = getApiBase();
+  if (!base) {
+    throw new Error('[apiClient] apiBase 未设置，请先调用 setApiBase()');
+  }
+
+  const formData = new FormData();
+  formData.append('file', file);
+  if (channelId) formData.append('channelId', channelId);
+  if (userId) formData.append('userId', userId);
+
+  const url = `${base}/api/upload/chat-image`;
+  const res = await fetch(url, {
+    method: 'POST',
+    body: formData,
+    // 不要手动设置 Content-Type，fetch 会自动加 multipart boundary。
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`[apiClient] POST ${url} → ${res.status}: ${text}`);
+  }
+
+  return res.json();
+}
+
+
 /**
  * 查询某个用户的头像历史。
  * @param {string} userId

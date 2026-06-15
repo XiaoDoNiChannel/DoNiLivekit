@@ -13,7 +13,7 @@ import {
  * 3. 用户切频道时发送 join_channel。
  * 4. 离开频道时发送 leave_channel。
  */
-export function createPresenceClient({ logError, onMessage }) {
+export function createPresenceClient({ logError, onMessage, onConnectionChange } = {}) {
     let socket = null;
     let identity = '';
     let userId = '';
@@ -23,6 +23,7 @@ export function createPresenceClient({ logError, onMessage }) {
     let shouldReconnect = false;
     let reconnectTimer = null;
     let lastApiBase = '';
+    let currentChannelId = null;
 
     /** 将 http://host:5000 转成 ws://host:5000。 */
     function toWsBase(apiBase) {
@@ -92,6 +93,14 @@ export function createPresenceClient({ logError, onMessage }) {
                     connectionId,
                     displayName,
                 });
+                onConnectionChange?.({
+                    connected: true,
+                    identity,
+                    userId,
+                    connectionId,
+                    displayName,
+                    currentChannelId,
+                });
                 resolve();
             };
 
@@ -123,6 +132,14 @@ export function createPresenceClient({ logError, onMessage }) {
                     connectionId,
                     displayName,
                 });
+                onConnectionChange?.({
+                    connected: false,
+                    identity,
+                    userId,
+                    connectionId,
+                    displayName,
+                    currentChannelId,
+                });
 
                 socket = null;
 
@@ -143,6 +160,7 @@ export function createPresenceClient({ logError, onMessage }) {
         shouldReconnect = false;
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
+        currentChannelId = null;
 
         if (socket) {
             socket.close();
@@ -150,6 +168,14 @@ export function createPresenceClient({ logError, onMessage }) {
         }
 
         resetPresenceStore();
+        onConnectionChange?.({
+            connected: false,
+            identity,
+            userId,
+            connectionId,
+            displayName,
+            currentChannelId,
+        });
     }
 
     /** 请求后端重新发送完整快照。 */
@@ -159,14 +185,19 @@ export function createPresenceClient({ logError, onMessage }) {
 
     /** 通知后端：当前用户进入某个语音频道。 */
     function joinChannel(channelId) {
+        const cleanId = String(channelId || '').trim();
+        if (!cleanId) return false;
+
+        currentChannelId = cleanId;
         return send({
             type: 'join_channel',
-            channelId,
+            channelId: cleanId,
         });
     }
 
     /** 通知后端：当前用户离开语音频道，但仍在大厅。 */
     function leaveChannel() {
+        currentChannelId = null;
         return send({
             type: 'leave_channel',
         });
@@ -212,6 +243,7 @@ export function createPresenceClient({ logError, onMessage }) {
         getIdentity,
         getUserId,
         getConnectionId,
+        getCurrentChannel: () => currentChannelId,
         isConnected,
         updateProfile,
     };

@@ -7,6 +7,9 @@ const CHAT_STORAGE_PREFIX = 'donichannel_chat_v1_';
 const MAX_MESSAGES_PER_CHANNEL = 200;
 // 同一发送者、相邻消息间隔在此时间内视为“连续消息”（可折叠头像/昵称）
 const GROUPING_THRESHOLD_MS = 5 * 60 * 1000;
+// 历史补偿节流：同一频道短时间多次触发时只允许一次请求。
+const HISTORY_REFRESH_MIN_INTERVAL_MS = 3000;
+const historyRefreshState = {};
 
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
 function generateId() {
@@ -296,34 +299,58 @@ export function shouldGroupWithPrev(prevMsg, currMsg) {
   return currMsg.timestamp - prevMsg.timestamp < GROUPING_THRESHOLD_MS;
 }
 
-export async function loadServerHistory(channelId, { limit = 50 } = {}) {
+export function loadServerHistory(channelId, { limit = 50 } = {}) {
   const cleanId = String(channelId || '').trim();
-  if (!cleanId) return;
+  if (!cleanId) return Promise.resolve(false);
 
-  try {
-    const { messages: serverMsgs } = await fetchChatHistory(cleanId, { limit });
-    if (!Array.isArray(serverMsgs) || serverMsgs.length === 0) return;
+  const state = historyRefreshState[cleanId] || (historyRefreshState[cleanId] = {
+    lastStartedAt: 0,
+    inFlight: null,
+  });
+  const now = Date.now();
 
-    const targetList = getChannelList(cleanId);
-    const selfId = '';
-
-    for (const raw of serverMsgs) {
-      const msg = normalizeMessage(raw, cleanId, selfId);
-      upsertMessageToChannel({ ...msg, status: 'sent' }, cleanId);
-    }
-
-    targetList.sort((a, b) => a.timestamp - b.timestamp);
-    if (targetList.length > MAX_MESSAGES_PER_CHANNEL) {
-      targetList.splice(0, targetList.length - MAX_MESSAGES_PER_CHANNEL);
-    }
-
-    if (chatStore.currentChannelId === cleanId) {
-      chatStore.messages = targetList;
-    }
-    persistChannel(cleanId);
-  } catch (e) {
-    logError('chatStore/loadServerHistory 加载服务器历史失败', e, 'warn');
+  // Store 层作为历史补偿唯一闸门：
+  // 1. 请求正在进行时，后续触发直接复用同一个 Promise。
+  // 2. 同一频道 3 秒内不再发起新的 GET /api/chat/history。
+  if (state.inFlight) return state.inFlight;
+  if (now - state.lastStartedAt < HISTORY_REFRESH_MIN_INTERVAL_MS) {
+    return Promise.resolve(false);
   }
+
+  state.lastStartedAt = now;
+  state.inFlight = (async () => {
+    try {
+      const { messages: serverMsgs } = await fetchChatHistory(cleanId, { limit });
+      if (Array.isArray(serverMsgs) && serverMsgs.length > 0) {
+        const targetList = getChannelList(cleanId);
+        const selfId = '';
+
+        for (const raw of serverMsgs) {
+          const msg = normalizeMessage(raw, cleanId, selfId);
+          upsertMessageToChannel({ ...msg, status: 'sent' }, cleanId);
+        }
+
+        targetList.sort((a, b) => a.timestamp - b.timestamp);
+        if (targetList.length > MAX_MESSAGES_PER_CHANNEL) {
+          targetList.splice(0, targetList.length - MAX_MESSAGES_PER_CHANNEL);
+        }
+
+        if (chatStore.currentChannelId === cleanId) {
+          chatStore.messages = targetList;
+        }
+        persistChannel(cleanId);
+      }
+
+      return true;
+    } catch (e) {
+      logError('chatStore/loadServerHistory 加载服务器历史失败', e, 'warn');
+      return false;
+    } finally {
+      state.inFlight = null;
+    }
+  })();
+
+  return state.inFlight;
 }
 
 export function applyServerChatMessage(serverMsg, selfIdentityOrUserId = '') {

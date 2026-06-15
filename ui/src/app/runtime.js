@@ -82,6 +82,12 @@ const presenceClient = createPresenceClient({
 
         requestStoreSync();
     },
+    onConnectionChange: (state = {}) => {
+        if (state.connected) {
+            schedulePresenceChannelSync('presence_connected', { delayMs: 50, snapshotDelayMs: 250 });
+        }
+        requestStoreSync();
+    },
 });
 
 
@@ -132,33 +138,28 @@ const chatClient = createChatClient({
     },
 });
 
-// Phase 2.2：历史补偿与订阅去重辅助。
-// 原因：进入频道、自动重连、发送前兜底都会触发订阅；真正适合拉历史的稳定时机是收到 chat_subscribed 之后。
+// Phase 2.2：历史补偿触发合并。
+// runtime 只负责把 focus / reconnect / subscribe 等连续触发合并成一次调度；
+// 真正的 3 秒节流和 in-flight Promise 复用统一由 chatStore.loadServerHistory 兜底。
 const CHAT_HISTORY_DEBOUNCE_MS = 250;
-const CHAT_HISTORY_MIN_INTERVAL_MS = 1200;
 const chatHistoryTimers = new Map();
-const chatHistoryLastLoadedAt = new Map();
 
 function scheduleChatHistoryRefresh(channelId, reason = 'unknown', options = {}) {
     const cleanId = String(channelId || '').trim();
     if (!cleanId) return;
 
-    const now = Date.now();
-    const lastLoadedAt = chatHistoryLastLoadedAt.get(cleanId) || 0;
-    const force = !!options.force;
     const delayMs = options.delayMs ?? CHAT_HISTORY_DEBOUNCE_MS;
-
-    if (!force && now - lastLoadedAt < CHAT_HISTORY_MIN_INTERVAL_MS) {
-        return;
-    }
 
     clearTimeout(chatHistoryTimers.get(cleanId));
     chatHistoryTimers.set(cleanId, setTimeout(async () => {
         chatHistoryTimers.delete(cleanId);
-        chatHistoryLastLoadedAt.set(cleanId, Date.now());
         try {
-            await loadServerHistory(cleanId);
-            console.log('[Chat History] refreshed', { channelId: cleanId, reason });
+            const refreshed = await loadServerHistory(cleanId);
+            if (refreshed) {
+                console.log('[Chat History] refreshed', { channelId: cleanId, reason });
+            } else {
+                console.debug?.('[Chat History] skipped by store throttle', { channelId: cleanId, reason });
+            }
         } catch (error) {
             logError('runtime/scheduleChatHistoryRefresh 加载聊天历史失败', error, 'warn');
         }
@@ -183,6 +184,60 @@ function refreshCurrentChatHistory(reason = 'manual', options = {}) {
     const current = roomConnectionFeature?.getCurrentChannel?.() || chatStore.currentChannelId;
     if (!current) return;
     scheduleChatHistoryRefresh(current, reason, options);
+}
+
+// Presence / LiveKit 重连成功后，用当前运行时频道重新校准后端成员状态。
+// 这里故意把 joinChannel 放在 requestSnapshot 前面：先告诉后端“我还在这个频道”，
+// 再拉一次快照，避免快照先返回旧状态导致频道底下少人。
+const PRESENCE_SYNC_DEBOUNCE_MS = 150;
+let presenceSyncTimer = null;
+let presenceSnapshotTimer = null;
+
+function getCurrentPresenceChannel() {
+    return roomConnectionFeature?.getCurrentChannel?.() || chatStore.currentChannelId || presenceClient.getCurrentChannel?.() || '';
+}
+
+function schedulePresenceSnapshot(reason = 'unknown', delayMs = 250) {
+    clearTimeout(presenceSnapshotTimer);
+    presenceSnapshotTimer = setTimeout(() => {
+        presenceSnapshotTimer = null;
+        if (!presenceClient.isConnected?.()) return;
+
+        try {
+            presenceClient.requestSnapshot?.();
+        } catch (error) {
+            logError(`runtime/schedulePresenceSnapshot requestSnapshot 失败 reason=${reason}`, error, 'warn');
+        }
+    }, delayMs);
+}
+
+function schedulePresenceChannelSync(reason = 'unknown', options = {}) {
+    const delayMs = options.delayMs ?? PRESENCE_SYNC_DEBOUNCE_MS;
+    clearTimeout(presenceSyncTimer);
+    presenceSyncTimer = setTimeout(() => {
+        presenceSyncTimer = null;
+        syncPresenceChannel(reason, options);
+    }, delayMs);
+}
+
+function syncPresenceChannel(reason = 'unknown', options = {}) {
+    if (!presenceClient.isConnected?.()) return;
+
+    const current = getCurrentPresenceChannel();
+
+    if (current) {
+        try {
+            const joined = presenceClient.joinChannel?.(current);
+            if (!joined) {
+                logError(`runtime/syncPresenceChannel joinChannel 未发送 reason=${reason} channel=${current}`, null, 'warn');
+            }
+        } catch (error) {
+            logError(`runtime/syncPresenceChannel joinChannel 失败 reason=${reason} channel=${current}`, error, 'warn');
+        }
+    }
+
+    // join_channel 会广播 participant_moved；再延迟拉一次完整快照，兜底修正漏事件/乱序。
+    schedulePresenceSnapshot(reason, options.snapshotDelayMs ?? 250);
 }
 
 if (typeof window !== 'undefined') {
@@ -294,6 +349,18 @@ const livekitEventsFeature = createLivekitEventsFeature({
     showLocalScreenPreview: (...args) => screenShareFeature.showLocalScreenPreview(...args),
     hideLocalScreenPreview: (...args) => screenShareFeature.hideLocalScreenPreview(...args),
     renderChatMessage: (...args) => chatFeature.renderChatMessage(...args),
+    onLivekitConnectionStable: ({ reason } = {}) => {
+        schedulePresenceChannelSync(`livekit_${reason || 'stable'}`, { delayMs: 120, snapshotDelayMs: 350 });
+        requestStoreSync();
+    },
+    onLivekitConnectionUnstable: ({ reason } = {}) => {
+        console.debug?.('[LiveKit] connection unstable', reason || 'unknown');
+        requestStoreSync();
+    },
+    onLivekitParticipantsChanged: ({ reason } = {}) => {
+        schedulePresenceChannelSync(`livekit_participants_${reason || 'changed'}`, { delayMs: 250, snapshotDelayMs: 450 });
+        requestStoreSync();
+    },
 });
 
 const rustMicFeature = createRustMicFeature({
@@ -607,7 +674,10 @@ function switchChannel(roomName) {
     }
     return afterAction(
         Promise.resolve(roomConnectionFeature.switchChannel(roomName)).then((result) => {
-            if (roomName) chatClient.subscribeChannel(roomName);
+            if (roomName) {
+                chatClient.subscribeChannel(roomName);
+                schedulePresenceChannelSync('switch_channel', { delayMs: 120, snapshotDelayMs: 350 });
+            }
             return result;
         })
     );
@@ -619,7 +689,10 @@ function connectToChannel(targetRoomName, options) {
     }
     return afterAction(
         Promise.resolve(roomConnectionFeature.connectToChannel(targetRoomName, options)).then((result) => {
-            if (result && targetRoomName) chatClient.subscribeChannel(targetRoomName);
+            if (result && targetRoomName) {
+                chatClient.subscribeChannel(targetRoomName);
+                schedulePresenceChannelSync('connect_to_channel', { delayMs: 120, snapshotDelayMs: 350 });
+            }
             return result;
         })
     );
@@ -813,6 +886,8 @@ Object.assign(window, {
     __presenceClient: presenceClient,
     __chatClient: chatClient,
     __syncAppStore: syncAppStore,
+    __syncPresenceChannel: syncPresenceChannel,
+    __schedulePresenceChannelSync: schedulePresenceChannelSync,
     getLiveKitRoom,
 });
 

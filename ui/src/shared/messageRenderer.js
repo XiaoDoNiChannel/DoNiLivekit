@@ -67,6 +67,73 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
+function cleanImageUrl(url) {
+  return String(url || '').replace(/"/g, '%22').replace(/</g, '').replace(/>/g, '');
+}
+
+function getUploadOrigin() {
+  if (typeof window === 'undefined') return '';
+
+  const saved = String(window.localStorage?.getItem('lk_server_ip') || '').trim();
+  if (saved) {
+    try {
+      if (/^https?:\/\//i.test(saved)) {
+        return new URL(saved).origin;
+      }
+
+      const normalized = saved.replace(/^wss?:\/\//i, '').replace(/\/$/, '');
+      const [host, port = '5000'] = normalized.split(':');
+      if (host) return `http://${host}:${port}`;
+    } catch (_) {
+      // fall through
+    }
+  }
+
+  try {
+    const { protocol, hostname, port, origin } = window.location;
+    if ((protocol === 'http:' || protocol === 'https:') && hostname) {
+      // Vite 开发服务通常在 5173，uploads 静态资源在 FastAPI 5000。
+      if (port === '5173') return `${protocol}//${hostname}:5000`;
+      return origin;
+    }
+  } catch (_) {
+    // ignore
+  }
+
+  return '';
+}
+
+function sanitizeImageUrl(rawUrl) {
+  const raw = String(rawUrl || '').trim();
+  if (!raw) return '';
+
+  // 后端上传图片统一走 /uploads/。在 Vite/Tauri 前端里，相对 /uploads 会指向前端服务，
+  // 所以这里解析到 FastAPI 的 origin，避免图片只显示 broken image 图标。
+  if (raw.startsWith('/uploads/')) {
+    const origin = getUploadOrigin();
+    return cleanImageUrl(origin ? `${origin}${raw}` : raw);
+  }
+
+  // 兼容未来如果后端返回完整 http(s) URL 的情况。
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return cleanImageUrl(parsed.href);
+    }
+  } catch (_) {
+    // ignore invalid URL
+  }
+
+  return '';
+}
+
+function buildImageHtml(src, alt = '聊天图片') {
+  const safeSrc = sanitizeImageUrl(src);
+  if (!safeSrc) return '';
+  const safeAlt = escapeHtml(alt || '聊天图片');
+  return `<button class="msg-image-wrap" type="button" data-image-src="${safeSrc}" aria-label="查看图片"><img class="msg-chat-image" src="${safeSrc}" alt="${safeAlt}" loading="lazy" decoding="async" data-image-src="${safeSrc}"></button>`;
+}
+
 /**
  * 将消息文本渲染为安全的富文本 HTML。
  * @param {string} rawText
@@ -96,6 +163,39 @@ export function renderMessageContent(rawText, mentionNames = []) {
 
   // 3. 转义剩余文本（防 XSS）
   text = escapeHtml(text);
+
+  // 3.5. 提取并保护图片消息，避免 URL 自动链接规则污染 img 标签。
+  // 发送端使用 ![图片](/uploads/...)；这里只允许 /uploads/ 或 http(s)。
+  const imageBlocks = [];
+  text = text.replace(/!\[([^\]]*)\]\(([^\s)]+)\)/g, (match, alt, url) => {
+    const html = buildImageHtml(url, alt || '聊天图片');
+    if (!html) return match;
+    const idx = imageBlocks.length;
+    imageBlocks.push(html);
+    return `\x00IMAGEBLOCK${idx}\x00`;
+  });
+
+
+
+  // 兼容旧测试消息：[图片]\n(/uploads/...) 或 [图片](http://...)
+  text = text.replace(/\[([^\]]*(?:图片|image)[^\]]*)\]\s*\(([^\s)]+)\)/gi, (match, alt, url) => {
+    const html = buildImageHtml(url, alt || '聊天图片');
+    if (!html) return match;
+    const idx = imageBlocks.length;
+    imageBlocks.push(html);
+    return `\x00IMAGEBLOCK${idx}\x00`;
+  });
+
+  // 兼容旧测试消息：如果历史消息里只是纯图片 URL，也直接渲染为缩略图。
+  // 注意这里在 URL 自动链接之前执行，并用占位符保护，避免生成 <a> 后破坏图片。
+  const imageUrlPattern = /(^|[\s>])((?:\/uploads\/[^\s<>'"]+|https?:\/\/[^\s<>'"]+)\.(?:png|jpe?g|webp|gif)(?:\?[^\s<>'"]*)?)/gi;
+  text = text.replace(imageUrlPattern, (match, prefix, url) => {
+    const html = buildImageHtml(url, '聊天图片');
+    if (!html) return match;
+    const idx = imageBlocks.length;
+    imageBlocks.push(html);
+    return `${prefix}\x00IMAGEBLOCK${idx}\x00`;
+  });
 
   // 4. Discord emoji :name:
   text = text.replace(/:([a-zA-Z0-9_+\-]+):/g, (match, name) => {
@@ -134,9 +234,10 @@ export function renderMessageContent(rawText, mentionNames = []) {
   // 8. 换行
   text = text.replace(/\n/g, '<br>');
 
-  // 9. 还原代码块和行内代码
+  // 9. 还原代码块、行内代码和图片块
   text = text.replace(/\x00INLINECODE(\d+)\x00/g, (_, i) => inlineCodes[Number(i)]);
   text = text.replace(/\x00CODEBLOCK(\d+)\x00/g, (_, i) => codeBlocks[Number(i)]);
+  text = text.replace(/\x00IMAGEBLOCK(\d+)\x00/g, (_, i) => imageBlocks[Number(i)]);
 
   return text;
 }

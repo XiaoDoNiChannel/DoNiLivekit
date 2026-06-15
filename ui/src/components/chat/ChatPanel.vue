@@ -3,16 +3,20 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import BaseAvatar from '../common/BaseAvatar.vue';
 import { chatStore, shouldGroupWithPrev, toggleReaction } from '../../stores/chatStore.js';
 import { profileStore } from '../../stores/profileStore.js';
+import { presenceStore } from '../../stores/presenceStore.js';
 import { renderMessageContent, QUICK_REACTIONS, EMOJI_LIST } from '../../shared/messageRenderer.js';
 import { appStore } from '../../stores/appStore.js';
-import { silentSyncReaction } from '../../shared/apiClient.js';
+import { silentSyncReaction, uploadChatImage } from '../../shared/apiClient.js';
 
 const emit = defineEmits(['send']);
-
 // ─── 输入框状态 ────────────────────────────────────────────────────────────────
 const inputText = ref('');
 const textareaEl = ref(null);
 const messagesEl = ref(null);
+const imageInputEl = ref(null);
+const isUploadingImage = ref(false);
+const previewImageUrl = ref('');
+const pendingImages = ref([]);
 
 // ─── Emoji 选择器 ──────────────────────────────────────────────────────────────
 const showEmojiPicker = ref(false);
@@ -26,6 +30,7 @@ const filteredEmoji = computed(() => {
 // ─── 消息 hover 菜单 ───────────────────────────────────────────────────────────
 const hoveredMsgId = ref(null);
 const reactionPickerMsgId = ref(null);
+const contextMenuMsgId = ref(null);
 let hideHoverTimer = null;
 
 function onMsgMouseenter(id) {
@@ -39,23 +44,56 @@ function onMsgMouseleave() {
 }
 function openReactionPicker(msgId) {
   reactionPickerMsgId.value = reactionPickerMsgId.value === msgId ? null : msgId;
+  contextMenuMsgId.value = null;
+  hoveredMsgId.value = msgId;
 }
 function closeReactionPicker() {
   reactionPickerMsgId.value = null;
   hoveredMsgId.value = null;
 }
 
+// 右键消息时直接打开表情回应菜单，不再显示 Pin 菜单。
+function openMessageContextMenu(msgId) {
+  reactionPickerMsgId.value = msgId;
+  contextMenuMsgId.value = null;
+  hoveredMsgId.value = msgId;
+}
+
+function closeMessageContextMenu() {
+  contextMenuMsgId.value = null;
+}
+
 // 点击空白处关闭 reaction picker & emoji picker
 function onDocumentClick(e) {
-  if (!e.target.closest('.reaction-picker') && !e.target.closest('.msg-action-btn')) {
+  if (!e.target.closest('.reaction-picker')) {
     reactionPickerMsgId.value = null;
   }
   if (!e.target.closest('.emoji-picker') && !e.target.closest('.emoji-toggle-btn')) {
     showEmojiPicker.value = false;
   }
+  if (!e.target.closest('.msg-context-menu')) {
+    contextMenuMsgId.value = null;
+  }
 }
-onMounted(() => document.addEventListener('click', onDocumentClick, true));
-onUnmounted(() => document.removeEventListener('click', onDocumentClick, true));
+function onDocumentKeydown(e) {
+  if (e.key === 'Escape') {
+    previewImageUrl.value = '';
+    reactionPickerMsgId.value = null;
+    contextMenuMsgId.value = null;
+    showEmojiPicker.value = false;
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('click', onDocumentClick, true);
+  document.addEventListener('keydown', onDocumentKeydown);
+  nextTick(() => resizeComposer());
+});
+onUnmounted(() => {
+  document.removeEventListener('click', onDocumentClick, true);
+  document.removeEventListener('keydown', onDocumentKeydown);
+  clearPendingImages();
+});
 
 // ─── 消息列表（带分组标记） ────────────────────────────────────────────────────
 const messages = computed(() => chatStore.messages);
@@ -96,15 +134,177 @@ const channelName = computed(() => appStore.connection.currentChannel || '聊天
 const isConnected = computed(() => appStore.connection.isConnected);
 
 // ─── 发送消息 ─────────────────────────────────────────────────────────────────
-function handleSend() {
+async function handleSend() {
   const text = inputText.value.trim();
-  if (!text) return;
-  emit('send', text);
-  inputText.value = '';
+  const imagesToSend = [...pendingImages.value];
+  if (!text && imagesToSend.length === 0) return;
+  if (!isConnected.value || isUploadingImage.value) return;
+
+  if (text) {
+    emit('send', text);
+    inputText.value = '';
+  }
+
+  if (imagesToSend.length > 0) {
+    clearPendingImages();
+    for (const item of imagesToSend) {
+      const ok = await uploadAndSendImage(item.file, 'pending');
+      if (!ok) {
+        // 失败时把未发送成功的图片放回预览区，避免用户需要重新截图/复制。
+        addPendingImages(imagesToSend.slice(imagesToSend.indexOf(item)).map((entry) => entry.file));
+        break;
+      }
+    }
+  }
+
   nextTick(() => {
-    if (textareaEl.value) textareaEl.value.style.height = 'auto';
+    resizeComposer();
     scrollToBottom(true);
   });
+}
+
+
+function openImagePicker() {
+  if (!isConnected.value || isUploadingImage.value) return;
+  imageInputEl.value?.click?.();
+}
+
+function isSupportedChatImage(file) {
+  return !!file && file.type?.startsWith('image/');
+}
+
+function ensureClipboardImageName(file, index = 0) {
+  if (!file) return file;
+  if (file.name) return file;
+
+  const ext = file.type === 'image/gif'
+    ? 'gif'
+    : file.type === 'image/webp'
+      ? 'webp'
+      : file.type === 'image/jpeg'
+        ? 'jpg'
+        : 'png';
+
+  return new File([file], `clipboard-${Date.now()}-${index}.${ext}`, { type: file.type || 'image/png' });
+}
+
+function makePendingImageId() {
+  if (window.crypto?.randomUUID) return `img_${window.crypto.randomUUID()}`;
+  return `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function addPendingImages(files = []) {
+  const nextItems = [];
+
+  files.forEach((file, index) => {
+    if (!isSupportedChatImage(file)) return;
+    if (file.size > 20 * 1024 * 1024) {
+      alert(`图片 ${file.name || index + 1} 超过 20MB，已跳过`);
+      return;
+    }
+
+    nextItems.push({
+      id: makePendingImageId(),
+      file,
+      name: file.name || `clipboard-${index + 1}`,
+      previewUrl: URL.createObjectURL(file),
+    });
+  });
+
+  if (nextItems.length === 0) return false;
+  pendingImages.value = [...pendingImages.value, ...nextItems];
+  nextTick(() => {
+    resizeComposer();
+    textareaEl.value?.focus?.();
+  });
+  return true;
+}
+
+function removePendingImage(id) {
+  const item = pendingImages.value.find((entry) => entry.id === id);
+  if (item?.previewUrl) URL.revokeObjectURL(item.previewUrl);
+  pendingImages.value = pendingImages.value.filter((entry) => entry.id !== id);
+}
+
+function clearPendingImages() {
+  pendingImages.value.forEach((entry) => {
+    if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+  });
+  pendingImages.value = [];
+}
+
+async function uploadAndSendImage(file, source = 'picker') {
+  if (!isConnected.value) {
+    alert('未连接频道，无法发送图片');
+    return false;
+  }
+
+  if (!isSupportedChatImage(file)) {
+    alert('请选择图片文件');
+    return false;
+  }
+
+  if (file.size > 20 * 1024 * 1024) {
+    alert('聊天图片不能超过 20MB');
+    return false;
+  }
+
+  const channelId = chatStore.currentChannelId || appStore.connection.currentChannel || 'lobby';
+  isUploadingImage.value = true;
+  try {
+    const res = await uploadChatImage(file, {
+      channelId,
+      userId: profileStore.userId,
+    });
+    const imageUrl = res?.imageUrl || res?.url;
+    if (!imageUrl) throw new Error('服务器没有返回图片地址');
+    emit('send', `![图片](${imageUrl})`);
+    nextTick(() => scrollToBottom(true));
+    return true;
+  } catch (error) {
+    console.error(`[ChatPanel] 上传聊天图片失败 source=${source}`, error);
+    alert(`上传图片失败：${error?.message || error}`);
+    return false;
+  } finally {
+    isUploadingImage.value = false;
+  }
+}
+
+function handleImageSelected(event) {
+  const files = Array.from(event.target?.files || []);
+  if (event.target) event.target.value = '';
+  if (files.length === 0) return;
+  addPendingImages(files.map((file, index) => ensureClipboardImageName(file, index)));
+}
+
+async function handlePaste(event) {
+  if (!event?.clipboardData || isUploadingImage.value) return;
+
+  const imageFiles = [];
+  const items = Array.from(event.clipboardData.items || []);
+  items.forEach((item, index) => {
+    if (item.kind !== 'file' || !item.type?.startsWith('image/')) return;
+    const file = item.getAsFile?.();
+    if (file) imageFiles.push(ensureClipboardImageName(file, index));
+  });
+
+  // 兼容部分环境：clipboardData.files 里有图片，但 items 里没有。
+  if (imageFiles.length === 0) {
+    Array.from(event.clipboardData.files || []).forEach((file, index) => {
+      if (isSupportedChatImage(file)) imageFiles.push(ensureClipboardImageName(file, index));
+    });
+  }
+
+  if (imageFiles.length === 0) return;
+
+  event.preventDefault();
+  addPendingImages(imageFiles);
+}
+
+function onMessageContentClick(event) {
+  const target = event.target?.closest?.('[data-image-src]');
+  const src = target?.dataset?.imageSrc;
+  if (src) previewImageUrl.value = src;
 }
 
 function handleKeydown(e) {
@@ -150,6 +350,7 @@ function applyFormatting(markup) {
   if (selected.length > 0) {
     inputText.value = text.slice(0, start) + markup + selected + markup + text.slice(end);
     nextTick(() => {
+      resizeComposer(el);
       el.focus();
       el.setSelectionRange(start + markup.length, end + markup.length);
     });
@@ -157,6 +358,7 @@ function applyFormatting(markup) {
     const placeholder = markup === '**' ? '粗体' : markup === '*' ? '斜体' : markup === '`' ? '代码' : markup === '~~' ? '删除线' : '剧透';
     inputText.value = text.slice(0, start) + markup + placeholder + markup + text.slice(end);
     nextTick(() => {
+      resizeComposer(el);
       el.focus();
       const newStart = start + markup.length;
       const newEnd = newStart + placeholder.length;
@@ -165,10 +367,14 @@ function applyFormatting(markup) {
   }
 }
 
-function autoResize(e) {
-  const el = e.target;
+function resizeComposer(el = textareaEl.value) {
+  if (!el) return;
   el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  el.style.height = Math.max(44, el.scrollHeight) + 'px';
+}
+
+function autoResize(e) {
+  resizeComposer(e.target);
 }
 
 // ─── Emoji 插入 ───────────────────────────────────────────────────────────────
@@ -184,6 +390,7 @@ function insertEmoji(emojiChar) {
   const after = inputText.value.slice(end);
   inputText.value = before + emojiChar + after;
   nextTick(() => {
+    resizeComposer(el);
     el.setSelectionRange(start + emojiChar.length, start + emojiChar.length);
     el.focus();
   });
@@ -212,6 +419,97 @@ function reactionCount(reactions, emoji) {
 
 function isMineReaction(reactions, emoji) {
   return (reactions?.[emoji] || []).includes(profileStore.userId);
+}
+
+
+function visibleReactions(reactions) {
+  const result = {};
+  for (const [emoji, users] of Object.entries(reactions || {})) {
+    // 旧版本里可能存过 📌，新 UI 不再显示/发送大头针。
+    if (emoji === '📌') continue;
+    if (Array.isArray(users) && users.length > 0) result[emoji] = users;
+  }
+  return result;
+}
+
+function hasVisibleReactions(reactions) {
+  return Object.keys(visibleReactions(reactions)).length > 0;
+}
+
+function addDisplayNameToMap(map, keys, name) {
+  const cleanName = String(name || '').trim();
+  if (!cleanName) return;
+  keys.forEach((key) => {
+    const cleanKey = String(key || '').trim();
+    if (cleanKey && !map.has(cleanKey)) map.set(cleanKey, cleanName);
+  });
+}
+
+const reactionDisplayNameMap = computed(() => {
+  const map = new Map();
+
+  const selfName = profileStore.displayName || localStorage.getItem('lk_username') || '我';
+  addDisplayNameToMap(map, [profileStore.userId, presenceStore.userId, presenceStore.identity, presenceStore.connectionId], selfName);
+
+  Object.values(presenceStore.participants || {}).forEach((participant) => {
+    addDisplayNameToMap(map, [participant.identity, participant.userId, participant.connectionId], participant.displayName);
+  });
+
+  (presenceStore.channels || []).forEach((channel) => {
+    (channel.members || []).forEach((member) => {
+      addDisplayNameToMap(map, [member.identity, member.userId, member.connectionId], member.displayName);
+    });
+  });
+
+  Object.values(chatStore._cache || {}).forEach((list) => {
+    (list || []).forEach((msg) => {
+      addDisplayNameToMap(map, [msg.senderId, msg.senderUserId, msg.senderIdentity], msg.senderName);
+    });
+  });
+
+  (chatStore.messages || []).forEach((msg) => {
+    addDisplayNameToMap(map, [msg.senderId, msg.senderUserId, msg.senderIdentity], msg.senderName);
+  });
+
+  return map;
+});
+
+function isSelfReactionUser(userId) {
+  const id = String(userId || '').trim();
+  if (!id) return false;
+  return [profileStore.userId, presenceStore.userId, presenceStore.identity, presenceStore.connectionId]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .includes(id);
+}
+
+function shortUserId(userId) {
+  const id = String(userId || '').trim();
+  if (!id) return '';
+  if (id.length <= 10) return id;
+  return `${id.slice(0, 4)}…${id.slice(-4)}`;
+}
+
+function resolveReactionDisplayName(userId) {
+  const id = String(userId || '').trim();
+  if (!id) return '未知用户';
+
+  if (isSelfReactionUser(id)) {
+    const selfName = profileStore.displayName || localStorage.getItem('lk_username') || '';
+    return selfName ? `${selfName}（我）` : '我';
+  }
+
+  const name = reactionDisplayNameMap.value.get(id);
+  if (name) return name;
+
+  return `未知用户 ${shortUserId(id)}`;
+}
+
+function reactionTitle(users, emoji) {
+  const names = Array.from(new Set((users || []).map(resolveReactionDisplayName)));
+  if (names.length === 0) return `回应了 ${emoji}`;
+  if (names.length <= 4) return `${names.join('、')} 回应了 ${emoji}`;
+  return `${names.slice(0, 4).join('、')} 等 ${names.length} 人回应了 ${emoji}`;
 }
 
 // ─── 富文本渲染 ───────────────────────────────────────────────────────────────
@@ -266,6 +564,7 @@ function formatFullTime(ts) {
         :class="{ 'mt-4': !msg.isGrouped, 'mt-0.5': msg.isGrouped }"
         @mouseenter="onMsgMouseenter(msg.id)"
         @mouseleave="onMsgMouseleave"
+        @contextmenu.prevent="openMessageContextMenu(msg.id)"
       >
         <!-- 头像列（非折叠时显示，折叠时占位） -->
         <div class="w-12 shrink-0 flex justify-center pt-0.5">
@@ -286,7 +585,7 @@ function formatFullTime(ts) {
         </div>
 
         <!-- 消息内容 -->
-        <div class="flex-1 min-w-0">
+        <div class="flex-1 min-w-0 max-w-full">
           <!-- 发送者昵称 + 时间（非折叠时显示） -->
           <div v-if="!msg.isGrouped" class="flex items-baseline gap-2 mb-1">
             <span
@@ -301,20 +600,21 @@ function formatFullTime(ts) {
           <!-- 正文（v-html 富文本渲染） -->
           <!-- eslint-disable-next-line vue/no-v-html -->
           <div
-            class="text-[#dcddde] text-sm leading-relaxed break-words msg-content"
+            class="block w-full max-w-full text-[#dcddde] text-sm leading-relaxed whitespace-pre-wrap break-words msg-content"
             v-html="renderContent(msg.content)"
+            @click="onMessageContentClick"
           />
 
-          <!-- Reactions -->
-          <div v-if="Object.keys(msg.reactions || {}).length > 0" class="flex flex-wrap gap-1 mt-1.5">
+          <!-- Reactions：只显示普通表情回应；旧版 📌 会被过滤 -->
+          <div v-if="hasVisibleReactions(msg.reactions)" class="flex flex-wrap gap-1 mt-1.5">
             <button
-              v-for="(users, emoji) in msg.reactions"
+              v-for="(users, emoji) in visibleReactions(msg.reactions)"
               :key="emoji"
               class="reaction-btn flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border transition-all duration-150"
               :class="isMineReaction(msg.reactions, emoji)
                 ? 'bg-[#5865f2]/20 border-[#5865f2]/60 text-[#5865f2]'
                 : 'bg-white/5 border-white/10 text-[#b5bac1] hover:bg-white/10 hover:border-white/20'"
-              :title="`${users.join(', ')} 回应了 ${emoji}`"
+              :title="reactionTitle(users, emoji)"
               @click="handleReaction(msg.id, emoji)"
             >
               <span>{{ emoji }}</span>
@@ -323,32 +623,7 @@ function formatFullTime(ts) {
           </div>
         </div>
 
-        <!-- 消息操作栏（hover 显示） -->
-        <div
-          class="msg-actions absolute right-2 top-0 -translate-y-1/2 flex items-center gap-1 bg-[#2b2d31] border border-white/10 rounded-lg px-1 py-0.5 shadow-lg"
-          :class="hoveredMsgId === msg.id ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'"
-          style="transition: opacity 0.1s;"
-        >
-          <!-- 快速 reaction -->
-          <button
-            v-for="qr in QUICK_REACTIONS.slice(0, 5)"
-            :key="qr.name"
-            class="msg-action-btn w-7 h-7 flex items-center justify-center text-base rounded hover:bg-white/10 transition-colors"
-            :title="`:${qr.name}:`"
-            @click.stop="handleReaction(msg.id, qr.char)"
-          >{{ qr.char }}</button>
-
-          <!-- 更多 reaction -->
-          <button
-            class="msg-action-btn w-7 h-7 flex items-center justify-center text-[#b5bac1] rounded hover:bg-white/10 hover:text-white transition-colors"
-            title="更多表情"
-            @click.stop="openReactionPicker(msg.id)"
-          >
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>
-            </svg>
-          </button>
-        </div>
+        <!-- 右键消息会直接打开 Reaction 选择器；不再显示 hover 操作栏和 Pin 菜单。 -->
 
         <!-- Reaction 选择器（气泡） -->
         <div
@@ -398,21 +673,58 @@ function formatFullTime(ts) {
 
     <!-- 输入区 -->
     <div class="px-3 pb-3 pt-2 shrink-0">
-      <div class="relative flex items-end bg-[#383a40] rounded-xl border border-white/5 focus-within:border-[#5865f2]/50 transition-colors">
+      <div class="relative flex flex-col bg-[#383a40] rounded-xl border border-white/5 focus-within:border-[#5865f2]/50 transition-colors overflow-hidden">
+        <div v-if="pendingImages.length > 0" class="pending-image-strip flex gap-2 px-3 pt-3 pb-1 overflow-x-auto custom-scroll">
+          <div
+            v-for="item in pendingImages"
+            :key="item.id"
+            class="pending-image-card relative w-16 h-16 rounded-lg overflow-hidden bg-black/20 border border-white/10 shrink-0"
+            :title="item.name"
+          >
+            <img :src="item.previewUrl" alt="待发送图片" class="w-full h-full object-cover">
+            <button
+              class="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/70 text-white text-sm leading-none hover:bg-[#f23f42] transition-colors"
+              title="移除图片"
+              @click.stop="removePendingImage(item.id)"
+            >×</button>
+          </div>
+        </div>
+
+        <div class="flex items-end min-w-0">
         <!-- 输入框 -->
         <textarea
           ref="textareaEl"
           v-model="inputText"
-          class="flex-1 bg-transparent text-[#dcddde] text-sm placeholder-[#4e5058] px-4 py-3 resize-none leading-relaxed outline-none max-h-30 min-h-[44px]"
-          :placeholder="isConnected ? `发送消息到 #${channelName}...` : '未连接，无法发送消息'"
+          class="chat-composer-textarea flex-1 bg-transparent text-[#dcddde] text-sm placeholder-[#4e5058] px-4 py-3 resize-none leading-relaxed outline-none min-h-[44px]"
+          :placeholder="isUploadingImage ? '图片上传中...' : (isConnected ? `发送消息到 #${channelName}...` : '未连接，无法发送消息')"
           :disabled="!isConnected"
           rows="1"
           @keydown="handleKeydown"
           @input="autoResize"
+          @paste="handlePaste"
         />
 
         <!-- 右侧工具栏 -->
         <div class="flex items-center gap-1 pr-2 pb-2 shrink-0">
+          <input
+            ref="imageInputEl"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            class="hidden"
+            @change="handleImageSelected"
+          >
+
+          <!-- 图片按钮 -->
+          <button
+            class="w-8 h-8 flex items-center justify-center rounded transition-colors"
+            :class="isConnected && !isUploadingImage
+              ? 'text-[#b5bac1] hover:bg-white/10 hover:text-white'
+              : 'text-[#4e5058] cursor-not-allowed'"
+            :disabled="!isConnected || isUploadingImage"
+            :title="isUploadingImage ? '图片上传中...' : '发送图片'"
+            @click.stop="openImagePicker"
+          >{{ isUploadingImage ? '…' : '🖼️' }}</button>
+
           <!-- Emoji 按钮 -->
           <button
             class="emoji-toggle-btn w-8 h-8 flex items-center justify-center text-[#b5bac1] rounded hover:bg-white/10 hover:text-white transition-colors text-lg"
@@ -423,10 +735,10 @@ function formatFullTime(ts) {
           <!-- 发送按钮 -->
           <button
             class="w-8 h-8 flex items-center justify-center rounded transition-all duration-150"
-            :class="inputText.trim() && isConnected
+            :class="(inputText.trim() || pendingImages.length > 0) && isConnected && !isUploadingImage
               ? 'bg-[#5865f2] text-white hover:bg-[#4752c4] shadow-[0_0_12px_rgba(88,101,242,0.4)]'
               : 'bg-white/5 text-[#4e5058] cursor-not-allowed'"
-            :disabled="!inputText.trim() || !isConnected"
+            :disabled="(!inputText.trim() && pendingImages.length === 0) || !isConnected || isUploadingImage"
             title="发送 (Enter)"
             @click="handleSend"
           >
@@ -434,6 +746,7 @@ function formatFullTime(ts) {
               <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
             </svg>
           </button>
+        </div>
         </div>
       </div>
 
@@ -473,14 +786,53 @@ function formatFullTime(ts) {
       </div>
 
       <div class="flex items-center justify-between mt-1 px-1">
-        <span class="text-[10px] text-[#4e5058]">Enter 发送 · Shift+Enter 换行</span>
+        <span class="text-[10px] text-[#4e5058]">Enter 发送 · Shift+Enter 换行 · Ctrl+V 添加图片预览</span>
         <span v-if="messages.length > 0" class="text-[10px] text-[#4e5058]">{{ messages.length }} 条消息</span>
       </div>
     </div>
+    <!-- 图片预览浮层 -->
+    <teleport to="body">
+      <div
+        v-if="previewImageUrl"
+        class="chat-image-preview fixed inset-0 z-[9999] bg-black/80 flex items-center justify-center p-6"
+        @click.self="previewImageUrl = ''"
+      >
+        <button
+          class="absolute top-5 right-5 w-10 h-10 rounded-full bg-white/10 text-white text-2xl leading-none hover:bg-white/20 transition-colors"
+          title="关闭"
+          @click="previewImageUrl = ''"
+        >×</button>
+        <img
+          :src="previewImageUrl"
+          alt="聊天图片预览"
+          class="max-w-[92vw] max-h-[88vh] object-contain rounded-lg shadow-2xl"
+          @click.stop
+        >
+      </div>
+    </teleport>
+
   </aside>
 </template>
 
 <style scoped>
+.chat-composer-textarea {
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.chat-composer-textarea::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.pending-image-strip {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.14) transparent;
+}
+.pending-image-card img {
+  display: block;
+}
+
 /* 自定义滚动条 */
 .custom-scroll::-webkit-scrollbar { width: 4px; }
 .custom-scroll::-webkit-scrollbar-track { background: transparent; }
@@ -488,9 +840,16 @@ function formatFullTime(ts) {
 .custom-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
 
 /* 富文本消息内容样式 */
+.msg-row {
+  min-width: 0;
+}
+
 :deep(.msg-content) {
-  word-break: break-word;
-  overflow-wrap: break-word;
+  display: block;
+  max-width: 100%;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 :deep(.msg-content strong) { color: #f2f3f5; font-weight: 700; }
 :deep(.msg-content em) { font-style: italic; color: #f2f3f5; }
@@ -552,6 +911,33 @@ function formatFullTime(ts) {
   color: #dcddde;
 }
 
+
+:deep(.msg-content .msg-image-wrap) {
+  display: inline-block;
+  max-width: min(320px, 100%);
+  margin: 4px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  cursor: zoom-in;
+  overflow: hidden;
+  vertical-align: top;
+}
+:deep(.msg-content .msg-image-wrap:hover) {
+  filter: brightness(1.08);
+}
+:deep(.msg-content .msg-chat-image) {
+  display: block;
+  max-width: min(320px, 100%);
+  max-height: 260px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(0,0,0,0.18);
+}
 /* 头像图片样式 */
 :deep(.base-avatar-img) {
   width: 100%;

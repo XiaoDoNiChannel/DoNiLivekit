@@ -64,6 +64,52 @@ export function createLivekitEventsFeature(context) {
         });
     }
 
+    function getUniqueRoomEvents(...eventNames) {
+        return Array.from(new Set(eventNames.filter(Boolean)));
+    }
+
+    function onRoomEvents(room, eventNames, handler) {
+        getUniqueRoomEvents(...eventNames).forEach((eventName) => {
+            try {
+                room.on(eventName, handler);
+            } catch (error) {
+                logError(`livekitEvents/registerRoomEvents 绑定事件失败: ${eventName}`, error, 'warn');
+            }
+        });
+    }
+
+    function notifyLiveKitStable(room, reason, detail = {}) {
+        try {
+            context.updateParticipantList?.();
+        } catch (error) {
+            logError(`livekitEvents/${reason} 刷新成员列表失败`, error, 'warn');
+        }
+
+        context.onLivekitConnectionStable?.({
+            reason,
+            room,
+            ...detail,
+        });
+    }
+
+    function notifyLiveKitUnstable(room, reason, detail = {}) {
+        try {
+            context.updateParticipantList?.();
+        } catch (error) {
+            logError(`livekitEvents/${reason} 刷新成员列表失败`, error, 'warn');
+        }
+
+        context.onLivekitConnectionUnstable?.({
+            reason,
+            room,
+            ...detail,
+        });
+    }
+
+    function normalizeConnectionState(state) {
+        return String(state || '').toLowerCase();
+    }
+
     /** 给当前 LiveKit Room 绑定事件；每次新建 Room 后必须调用一次。 */
     function registerRoomEvents(room) {
         if (!room) return;
@@ -179,9 +225,13 @@ export function createLivekitEventsFeature(context) {
             removeLocalScreenRestoreCard(participant.identity);
             delete localScreenControls[participant.identity];
             context.updateParticipantList();
+            context.onLivekitParticipantsChanged?.({ reason: 'participant_disconnected', participant, room });
         });
 
-        room.on(context.LivekitClient.RoomEvent.ParticipantConnected, context.updateParticipantList);
+        room.on(context.LivekitClient.RoomEvent.ParticipantConnected, (participant) => {
+            context.updateParticipantList();
+            context.onLivekitParticipantsChanged?.({ reason: 'participant_connected', participant, room });
+        });
 
         room.on(context.LivekitClient.RoomEvent.ActiveSpeakersChanged, (speakers) => {
             const nextActiveIdentities = new Set();
@@ -250,6 +300,31 @@ export function createLivekitEventsFeature(context) {
                 // 此处不再处理 data.msg 避免重复和产生假 ID 导致无法点赞
             } catch (e) {
                 logError('livekitEvents/DataReceived 解析数据失败', e);
+            }
+        });
+
+        // LiveKit 信令/网络恢复后，LiveKit Room 里的成员可能已经恢复，
+        // 但 Presence 频道成员状态不一定会自动重新 join。
+        // 这里把“LiveKit 已稳定”通知 runtime，让 runtime 用当前频道重新校准 Presence。
+        const RoomEvent = context.LivekitClient.RoomEvent || {};
+        onRoomEvents(room, [RoomEvent.Reconnected, 'reconnected'], () => {
+            notifyLiveKitStable(room, 'reconnected');
+        });
+        onRoomEvents(room, [RoomEvent.Connected, 'connected'], () => {
+            notifyLiveKitStable(room, 'connected');
+        });
+        onRoomEvents(room, [RoomEvent.Reconnecting, 'reconnecting'], () => {
+            notifyLiveKitUnstable(room, 'reconnecting');
+        });
+        onRoomEvents(room, [RoomEvent.Disconnected, 'disconnected'], (reason) => {
+            notifyLiveKitUnstable(room, 'disconnected', { disconnectReason: reason });
+        });
+        onRoomEvents(room, [RoomEvent.ConnectionStateChanged, 'connectionStateChanged'], (state) => {
+            const normalized = normalizeConnectionState(state || room.state || room.connectionState);
+            if (normalized === 'connected') {
+                notifyLiveKitStable(room, 'connection_state_connected', { state });
+            } else if (normalized === 'reconnecting') {
+                notifyLiveKitUnstable(room, 'connection_state_reconnecting', { state });
             }
         });
     }

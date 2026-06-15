@@ -41,6 +41,49 @@ export function setPresenceConnectionState({ connected, identity, userId, connec
     presenceStore.lastUpdatedAt = Date.now();
 }
 
+function cleanText(value) {
+    return String(value || '').trim();
+}
+
+function makeIdentityKeys({ identity, userId, connectionId } = {}) {
+    return new Set([identity, userId, connectionId].map(cleanText).filter(Boolean));
+}
+
+function memberMatches(member, { identity, userId, connectionId, displayName } = {}) {
+    if (!member) return false;
+
+    const strongKeys = makeIdentityKeys({ identity, userId, connectionId });
+    const memberStrongKeys = makeIdentityKeys({
+        identity: member.identity,
+        userId: member.userId,
+        connectionId: member.connectionId,
+    });
+
+    for (const key of strongKeys) {
+        if (memberStrongKeys.has(key)) return true;
+    }
+
+    // 只有在没有 identity/userId/connectionId 这类强身份时，才退回 displayName。
+    // 避免两个用户同名时互相误删。
+    if (strongKeys.size === 0) {
+        const name = cleanText(displayName);
+        return !!name && cleanText(member.displayName) === name;
+    }
+
+    return false;
+}
+
+function getMessageTargetChannel(message = {}) {
+    return cleanText(
+        message.to ??
+        message.channelId ??
+        message.currentChannel ??
+        message.room ??
+        message.targetChannel ??
+        ''
+    );
+}
+
 /** 标准化成员对象，保证 Vue 渲染层字段稳定。 */
 function normalizeMember(member) {
     if (!member) return null;
@@ -57,10 +100,10 @@ function normalizeMember(member) {
         };
     }
 
-    const identity = String(member.identity || member.name || member.displayName || '').trim();
-    const userId = String(member.userId || member.identity || member.name || member.displayName || '').trim();
-    const connectionId = String(member.connectionId || '').trim();
-    const displayName = String(member.displayName || member.name || member.identity || '').trim();
+    const identity = cleanText(member.identity || member.name || member.displayName);
+    const userId = cleanText(member.userId || member.identity || member.name || member.displayName);
+    const connectionId = cleanText(member.connectionId);
+    const displayName = cleanText(member.displayName || member.name || member.identity);
 
     if (!identity && !displayName) return null;
 
@@ -78,14 +121,23 @@ function normalizeMember(member) {
 
 /** 标准化频道对象，后续 Discord UI 可以继续扩展 type/category/icon 等字段。 */
 function normalizeChannel(channel) {
-    const id = String(channel?.id || channel?.name || '').trim();
-    const name = String(channel?.name || channel?.id || '').trim();
+    const id = cleanText(channel?.id || channel?.name);
+    const name = cleanText(channel?.name || channel?.id);
 
     if (!id && !name) return null;
 
-    const members = Array.isArray(channel.members)
-        ? channel.members.map(normalizeMember).filter(Boolean)
-        : [];
+    const members = [];
+    const rawMembers = Array.isArray(channel.members) ? channel.members : [];
+    rawMembers.forEach((member) => {
+        const normalized = normalizeMember(member);
+        if (!normalized) return;
+        const index = findMemberIndex(members, normalized);
+        if (index >= 0) {
+            members[index] = { ...members[index], ...normalized };
+        } else {
+            members.push(normalized);
+        }
+    });
 
     return {
         id: id || name,
@@ -97,7 +149,7 @@ function normalizeChannel(channel) {
 
 /** 查找频道索引，兼容 id/name 两种字段。 */
 function findChannelIndex(channelId) {
-    const cleanId = String(channelId || '').trim();
+    const cleanId = cleanText(channelId);
     if (!cleanId) return -1;
 
     return presenceStore.channels.findIndex((channel) => {
@@ -105,9 +157,13 @@ function findChannelIndex(channelId) {
     });
 }
 
+function findMemberIndex(members, memberLike) {
+    return members.findIndex((member) => memberMatches(member, memberLike));
+}
+
 /** 确保频道存在；用于处理先收到 moved、后收到 snapshot 的极端顺序。 */
 function ensureChannel(channelId) {
-    const cleanId = String(channelId || '').trim();
+    const cleanId = cleanText(channelId);
     if (!cleanId) return null;
 
     let index = findChannelIndex(cleanId);
@@ -126,15 +182,61 @@ function ensureChannel(channelId) {
 }
 
 /** 从全部频道移除指定成员，避免切频道后同一个人残留在旧频道。 */
-function removeMemberFromAllChannels(identity, displayName) {
-    const id = String(identity || '').trim();
-    const name = String(displayName || '').trim();
+function removeMemberFromAllChannels(identity, displayName, userId = '', connectionId = '') {
+    const matcher = { identity, userId, connectionId, displayName };
 
     presenceStore.channels.forEach((channel) => {
-        channel.members = channel.members.filter((member) => {
-            return member.identity !== id && member.displayName !== name;
-        });
+        channel.members = channel.members.filter((member) => !memberMatches(member, matcher));
     });
+}
+
+function upsertMemberToChannel(channelId, memberData) {
+    const channel = ensureChannel(channelId);
+    const member = normalizeMember(memberData);
+    if (!channel || !member) return;
+
+    const index = findMemberIndex(channel.members, member);
+    if (index >= 0) {
+        channel.members[index] = {
+            ...channel.members[index],
+            ...member,
+        };
+    } else {
+        channel.members.push(member);
+    }
+}
+
+function removeParticipantRecords({ identity, userId, connectionId, displayName } = {}) {
+    const strongKeys = makeIdentityKeys({ identity, userId, connectionId });
+    const fallbackName = cleanText(displayName);
+
+    for (const key of Object.keys(presenceStore.participants)) {
+        const participant = presenceStore.participants[key];
+        if (strongKeys.has(cleanText(key)) || memberMatches(participant, { identity, userId, connectionId, displayName })) {
+            delete presenceStore.participants[key];
+        } else if (strongKeys.size === 0 && fallbackName && cleanText(participant?.displayName) === fallbackName) {
+            delete presenceStore.participants[key];
+        }
+    }
+}
+
+function upsertParticipantRecord(memberData, currentChannel) {
+    const member = normalizeMember(memberData);
+    if (!member) return;
+
+    const key = member.identity || member.userId || member.connectionId || member.displayName;
+    presenceStore.participants[key] = {
+        ...(presenceStore.participants[key] || {}),
+        identity: member.identity,
+        userId: member.userId,
+        connectionId: member.connectionId,
+        displayName: member.displayName,
+        currentChannel: currentChannel || null,
+        avatarColor: member.avatarColor,
+        avatarPreset: member.avatarPreset,
+        avatarUrl: member.avatarUrl,
+        statusText: member.statusText || '在线',
+    };
 }
 
 /** 应用后端推送的完整 Presence 快照。 */
@@ -155,91 +257,81 @@ export function applyPresenceSnapshot(message) {
 
 /** 应用成员移动事件。 */
 function applyParticipantMoved(message) {
-    const identity = String(message.identity || '').trim();
-    const displayName = String(message.displayName || message.identity || '').trim();
-    const targetChannel = String(message.to || '').trim();
+    const identity = cleanText(message.identity);
+    const userId = cleanText(message.userId);
+    const connectionId = cleanText(message.connectionId);
+    const displayName = cleanText(message.displayName || message.identity || message.userId);
+    const targetChannel = getMessageTargetChannel(message);
 
-    if (!identity && !displayName) return;
+    if (!identity && !displayName && !userId && !connectionId) return;
 
-    removeMemberFromAllChannels(identity, displayName);
+    removeMemberFromAllChannels(identity, displayName, userId, connectionId);
+
+    const memberData = {
+        identity: identity || userId || displayName,
+        userId: userId || identity || displayName,
+        connectionId,
+        displayName: displayName || identity || userId,
+        avatarColor: message.avatarColor,
+        avatarPreset: message.avatarPreset,
+        avatarUrl: message.avatarUrl,
+        statusText: message.statusText || '在线',
+    };
 
     if (targetChannel) {
-        const channel = ensureChannel(targetChannel);
-        if (channel) {
-            const exists = channel.members.some((member) => {
-                return member.identity === identity || member.displayName === displayName;
-            });
-
-            if (!exists) {
-                channel.members.push({
-                    identity: identity || displayName,
-                    userId: message.userId || identity || displayName,
-                    connectionId: message.connectionId || '',
-                    displayName: displayName || identity,
-                    avatarColor: message.avatarColor,
-                    avatarPreset: message.avatarPreset,
-                    avatarUrl: message.avatarUrl,
-                    statusText: message.statusText || '在线',
-                });
-            }
-        }
+        upsertMemberToChannel(targetChannel, memberData);
     }
 
-    if (identity || displayName) {
-        const key = identity || displayName;
-        presenceStore.participants[key] = {
-            ...(presenceStore.participants[key] || {}),
-            identity: key,
-            userId: message.userId || key,
-            connectionId: message.connectionId || '',
-            displayName: displayName || key,
-            currentChannel: targetChannel || null,
-            avatarColor: message.avatarColor,
-            avatarPreset: message.avatarPreset,
-            avatarUrl: message.avatarUrl,
-            statusText: message.statusText || '在线',
-        };
-    }
+    upsertParticipantRecord(memberData, targetChannel || null);
 }
 
 /** 应用用户离线事件。 */
 function applyParticipantOffline(message) {
-    const identity = String(message.identity || '').trim();
-    const displayName = String(message.displayName || message.identity || '').trim();
+    const identity = cleanText(message.identity);
+    const userId = cleanText(message.userId);
+    const connectionId = cleanText(message.connectionId);
+    const displayName = cleanText(message.displayName || message.identity || message.userId);
 
-    removeMemberFromAllChannels(identity, displayName);
-
-    if (identity && presenceStore.participants[identity]) {
-        delete presenceStore.participants[identity];
-    }
+    removeMemberFromAllChannels(identity, displayName, userId, connectionId);
+    removeParticipantRecords({ identity, userId, connectionId, displayName });
 }
 
 /** 应用用户进入大厅事件；未进入语音频道时不显示在频道下面。 */
 function applyParticipantOnline(message) {
     const participant = message.participant || {};
-    const identity = String(participant.identity || '').trim();
-    const displayName = String(participant.displayName || participant.identity || '').trim();
+    const identity = cleanText(participant.identity);
+    const userId = cleanText(participant.userId);
+    const connectionId = cleanText(participant.connectionId);
+    const displayName = cleanText(participant.displayName || participant.identity || participant.userId);
+    const currentChannel = cleanText(participant.currentChannel || participant.channelId);
 
-    if (!identity && !displayName) return;
+    if (!identity && !displayName && !userId && !connectionId) return;
 
-    const key = identity || displayName;
-    presenceStore.participants[key] = {
-        identity: key,
-        userId: participant.userId || key,
-        connectionId: participant.connectionId || '',
-        displayName: displayName || key,
-        currentChannel: participant.currentChannel || null,
+    const memberData = {
+        identity: identity || userId || displayName,
+        userId: userId || identity || displayName,
+        connectionId,
+        displayName: displayName || identity || userId,
         avatarColor: participant.avatarColor,
         avatarPreset: participant.avatarPreset,
         avatarUrl: participant.avatarUrl,
         statusText: participant.statusText || '在线',
     };
+
+    upsertParticipantRecord(memberData, currentChannel || null);
+
+    if (currentChannel) {
+        removeMemberFromAllChannels(identity, displayName, userId, connectionId);
+        upsertMemberToChannel(currentChannel, memberData);
+    }
 }
 
 /** 应用用户资料更新（头像颜色、预设 emoji、头像 URL）。 */
 function applyProfileUpdate(message) {
-    const identity = String(message.identity || '').trim();
-    const userId = String(message.userId || '').trim();
+    const identity = cleanText(message.identity);
+    const userId = cleanText(message.userId);
+    const connectionId = cleanText(message.connectionId);
+    const displayName = cleanText(message.displayName);
 
     const applyToMember = (member) => {
         if (!member) return;
@@ -250,15 +342,15 @@ function applyProfileUpdate(message) {
         member.statusText = message.statusText || member.statusText || '在线';
     };
 
-    for (const key of [identity, userId]) {
-        if (key && presenceStore.participants[key]) {
-            applyToMember(presenceStore.participants[key]);
+    for (const participant of Object.values(presenceStore.participants)) {
+        if (memberMatches(participant, { identity, userId, connectionId, displayName })) {
+            applyToMember(participant);
         }
     }
 
     for (const channel of presenceStore.channels) {
         for (const member of channel.members) {
-            if (member.identity === identity || (userId && member.userId === userId)) {
+            if (memberMatches(member, { identity, userId, connectionId, displayName })) {
                 applyToMember(member);
             }
         }
