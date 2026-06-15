@@ -198,6 +198,7 @@ roomConnectionFeature = createRoomConnectionFeature({
     sanitizeText,
     getRoom: () => room,
     setRoom: (value) => { room = value; requestStoreSync(); },
+    onAutoJoinChannel: switchChannel,
     ensureAudioContext,
     audioPipelines: audioPipelinesFeature,
     rustMic: rustMicFeature,

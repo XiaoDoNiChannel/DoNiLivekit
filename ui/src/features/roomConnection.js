@@ -203,7 +203,12 @@ export function createRoomConnectionFeature(context) {
         document.getElementById('header').innerText = '# 🏛️ DoNiChannel 电竞大厅（选择左侧语音分组）';
 
         try {
-            const { profileStore } = await import('../stores/profileStore.js');
+            const { profileStore, updateDisplayName } = await import('../stores/profileStore.js');
+            // 同步输入框的昵称到全局 profileStore 中，确保发消息时使用最新昵称
+            if (username && username !== profileStore.displayName) {
+                updateDisplayName(username);
+            }
+
             await context.presence.connect({
                 apiBase: serverConfig.apiBase,
                 username,
@@ -224,7 +229,11 @@ export function createRoomConnectionFeature(context) {
                 const targetChannel = savedChannel && availableChannels.includes(savedChannel)
                     ? savedChannel
                     : availableChannels[0];
-                await switchChannel(targetChannel);
+                if (context.onAutoJoinChannel) {
+                    await context.onAutoJoinChannel(targetChannel);
+                } else {
+                    await switchChannel(targetChannel);
+                }
             }
         }
     }
