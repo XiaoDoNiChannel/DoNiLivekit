@@ -319,13 +319,14 @@ export function applyServerChatMessage(serverMsg, selfIdentity) {
   if (!serverMsg || !serverMsg.channelId) return;
 
   const targetChannelId = serverMsg.channelId;
+  const activeChannelId = chatStore.currentChannelId || 'lobby';
 
   // 去重检查函数
   function isDuplicate(msgList) {
     return msgList.some((m) => m.id === serverMsg.id);
   }
 
-  if (targetChannelId === chatStore.currentChannelId) {
+  if (targetChannelId === activeChannelId) {
     // 属于当前频道：直接写入当前消息列表
     if (isDuplicate(chatStore.messages)) return;
     addChatMessage({
