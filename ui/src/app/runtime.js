@@ -342,15 +342,10 @@ function createChannel() { return roomConnectionFeature.createChannel(); }
 function resetRoomUIAfterDisconnect() { return roomConnectionFeature.resetRoomUIAfterDisconnect(); }
 function joinRoom(options) {
     // 进入大厅时记录 apiBase，供后续 REST 调用使用
+    // getServerConfig() 实时读取 #server-ip 输入框，是最权威的来源
     try {
         const cfg = roomConnectionFeature.getServerConfig?.();
-        const base = cfg?.apiBase || (() => {
-            const ip = appStore.connection.serverIp || DEFAULT_SERVER_IP;
-            const host = ip.includes(':') ? ip.split(':')[0] : ip;
-            const port = ip.includes(':') ? ip.split(':')[1] : '5000';
-            return `http://${host}:${port}`;
-        })();
-        if (base) setApiBase(base);
+        if (cfg?.apiBase) setApiBase(cfg.apiBase);
     } catch (_) {}
     return afterAction(roomConnectionFeature.joinRoom(options));
 }

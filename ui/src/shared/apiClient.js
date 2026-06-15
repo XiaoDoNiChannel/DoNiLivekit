@@ -9,24 +9,51 @@
  */
 
 import { logError } from './errors.js';
-import { appStore } from '../stores/appStore.js';
 import { DEFAULT_SERVER_IP } from './constants.js';
 
 let _apiBase = '';
 
-/** 获取当前后端基础地址，未显式设置时自动推断。 */
+/**
+ * 将 "host:port" 格式（或已带协议头的 URL）解析为 http://host:port。
+ * @param {string} ip - 如 "10.0.0.1:5000" 或 "http://10.0.0.1:5000"
+ * @returns {string}
+ */
+function ipToApiBase(ip) {
+  const clean = String(ip || '').trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^wss?:\/\//i, '')
+    .replace(/\/$/, '');
+  if (!clean) return '';
+  const host = clean.includes(':') ? clean.split(':')[0] : clean;
+  const port = clean.includes(':') ? (clean.split(':')[1] || '5000') : '5000';
+  return `http://${host}:${port}`;
+}
+
+/**
+ * 获取当前后端基础地址。
+ *
+ * 优先级：
+ *   1. 已通过 setApiBase() 显式设置的地址（joinRoom 时设置）
+ *   2. 实时读取 DOM #server-ip 输入框（与 getServerConfig 同源，最准确）
+ *   3. localStorage lk_server_ip（页面刷新后的恢复值）
+ *   4. DEFAULT_SERVER_IP 常量（最终兜底，不再硬编码 127.0.0.1）
+ */
 export function getApiBase() {
   if (_apiBase) return _apiBase;
-  
-  // 未加入房间前，_apiBase 为空，从 appStore 获取并推断
+
   try {
-    const ip = appStore?.connection?.serverIp || DEFAULT_SERVER_IP;
-    const host = ip.includes(':') ? ip.split(':')[0] : ip;
-    const port = ip.includes(':') ? ip.split(':')[1] : '5000';
-    return `http://${host}:${port}`;
-  } catch (e) {
-    return 'http://127.0.0.1:5000';
-  }
+    // 优先实时读 DOM 输入框（与 getServerConfig() 同源，保持一致）
+    const inputEl = typeof document !== 'undefined' ? document.getElementById('server-ip') : null;
+    const domValue = inputEl?.value?.trim();
+    if (domValue) return ipToApiBase(domValue);
+
+    // 其次读 localStorage 中保存的上次连接地址
+    const stored = localStorage.getItem('lk_server_ip');
+    if (stored) return ipToApiBase(stored);
+  } catch (_) {}
+
+  // 最终兜底使用常量（不再硬编码 127.0.0.1）
+  return ipToApiBase(DEFAULT_SERVER_IP);
 }
 
 /** 设置当前后端基础地址（由 runtime.js 在连接时调用）。 */
