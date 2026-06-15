@@ -340,16 +340,20 @@ function startRoomPolling() { return roomConnectionFeature.startRoomPolling(); }
 function stopRoomPolling() { return roomConnectionFeature.stopRoomPolling(); }
 function createChannel() { return roomConnectionFeature.createChannel(); }
 function resetRoomUIAfterDisconnect() { return roomConnectionFeature.resetRoomUIAfterDisconnect(); }
-function joinRoom(options) {
-    // 进入大厅时记录 apiBase，供后续 REST 调用使用
-    // getServerConfig() 实时读取 #server-ip 输入框，是最权威的来源
+function ensureApiBase() {
     try {
         const cfg = roomConnectionFeature.getServerConfig?.();
         if (cfg?.apiBase) setApiBase(cfg.apiBase);
     } catch (_) {}
+}
+
+function joinRoom(options) {
+    ensureApiBase();
     return afterAction(roomConnectionFeature.joinRoom(options));
 }
+
 function switchChannel(roomName) {
+    ensureApiBase();
     // 切换频道时，先切换本地频道记录，再从服务器加载历史
     if (roomName) {
         switchChatChannel(roomName);
@@ -357,13 +361,16 @@ function switchChannel(roomName) {
     }
     return afterAction(roomConnectionFeature.switchChannel(roomName));
 }
+
 function connectToChannel(targetRoomName, options) {
+    ensureApiBase();
     if (targetRoomName) {
         switchChatChannel(targetRoomName);
         loadServerHistory(targetRoomName).catch(() => {});
     }
     return afterAction(roomConnectionFeature.connectToChannel(targetRoomName, options));
 }
+
 function leaveRoom() { return afterAction(roomConnectionFeature.leaveRoom()); }
 
 
