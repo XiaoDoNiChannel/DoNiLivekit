@@ -20,6 +20,10 @@ export function createPresenceClient({ logError, onMessage }) {
     let shouldReconnect = false;
     let reconnectTimer = null;
     let lastApiBase = '';
+    // 保存最近一次的头像信息，供重连时使用
+    let lastAvatarColor = '#5865f2';
+    let lastAvatarPreset = '';
+    let lastAvatarUrl = '';
 
     /** 将 http://host:5000 转成 ws://host:5000。 */
     function toWsBase(apiBase) {
@@ -58,6 +62,11 @@ export function createPresenceClient({ logError, onMessage }) {
         // 优先使用传入的 identity，其次 sessionStorage，最后自动生成
         identity = propIdentity || sessionStorage.getItem('lk_presence_identity') || createIdentity(cleanName);
         sessionStorage.setItem('lk_presence_identity', identity);
+
+        // 更新最新头像信息（供重连使用）
+        if (avatarColor) lastAvatarColor = avatarColor;
+        if (avatarPreset !== undefined) lastAvatarPreset = avatarPreset;
+        if (avatarUrl !== undefined) lastAvatarUrl = avatarUrl;
 
         lastApiBase = apiBase;
         shouldReconnect = true;
@@ -110,7 +119,15 @@ export function createPresenceClient({ logError, onMessage }) {
                 if (shouldReconnect && lastApiBase) {
                     clearTimeout(reconnectTimer);
                     reconnectTimer = setTimeout(() => {
-                        connect({ apiBase: lastApiBase, username: displayName }).catch((error) => {
+                        // 重连时带上完整头像信息，避免服务端重新注册时头像丢失
+                        connect({
+                            apiBase: lastApiBase,
+                            username: displayName,
+                            identity,
+                            avatarColor: lastAvatarColor,
+                            avatarPreset: lastAvatarPreset,
+                            avatarUrl: lastAvatarUrl,
+                        }).catch((error) => {
                             logError?.('presenceClient/reconnect Presence 重连失败', error, 'warn');
                         });
                     }, 1500);
@@ -165,6 +182,10 @@ export function createPresenceClient({ logError, onMessage }) {
 
     /** 更新并广播当前用户的个人资料 */
     function updateProfile({ avatarColor, avatarPreset, avatarUrl }) {
+        // 缓存最新头像信息，供重连时使用
+        if (avatarColor) lastAvatarColor = avatarColor;
+        if (avatarPreset !== undefined) lastAvatarPreset = avatarPreset;
+        if (avatarUrl !== undefined) lastAvatarUrl = avatarUrl || '';
         return send({
             type: 'update_profile',
             avatarColor,

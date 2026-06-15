@@ -180,10 +180,31 @@ export async function silentPostChatMessage(msg) {
  */
 export async function silentSyncReaction(params) {
   try {
-    if (!_apiBase) return;
+    const base = getApiBase();
+    if (!base) return;
     return await syncReaction(params);
   } catch (e) {
     logError('apiClient/silentSyncReaction Reaction 同步失败', e, 'warn');
     return null;
   }
+}
+
+/**
+ * 将相对路径的头像 URL（如 /uploads/xxx.png）拼接为完整 URL。
+ * 如果已经是完整的 URL、base64 或为空，则直接返回原内容。
+ * @param {string|null} avatarUrl
+ * @returns {string|null}
+ */
+export function resolveAvatarUrl(avatarUrl) {
+  if (!avatarUrl) return null;
+  // base64 数据 URL 或已经是完整 URL，直接返回
+  if (avatarUrl.startsWith('data:') || avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://')) {
+    return avatarUrl;
+  }
+  // 相对路径（如 /uploads/xxx.png）拼接 apiBase
+  if (avatarUrl.startsWith('/')) {
+    const base = getApiBase();
+    return base ? `${base}${avatarUrl}` : avatarUrl;
+  }
+  return avatarUrl;
 }

@@ -627,6 +627,10 @@ class PresenceManager:
                 "displayName": participant.display_name,
                 "from": old_channel,
                 "to": clean_channel,
+                # 同步携带头像信息，避免频道成员列表中头像显示异常
+                "avatarColor": participant.avatar_color,
+                "avatarPreset": participant.avatar_preset,
+                "avatarUrl": participant.avatar_url,
             }
 
         await self.broadcast(payload)
@@ -858,6 +862,8 @@ async def post_reaction(body: dict = Body(default_factory=dict)):
     添加或取消 Reaction，并广播给所有在线成员。
 
     body: { messageId, emoji, senderId, channelId }
+    
+    使用单连接事务原子完成读-改-写，防止并发点击时 reaction 互相覆盖（Lost Update）。
     """
     message_id = str(body.get("messageId") or "").strip()
     emoji = str(body.get("emoji") or "").strip()
@@ -867,28 +873,47 @@ async def post_reaction(body: dict = Body(default_factory=dict)):
     if not message_id or not emoji or not sender_id:
         raise HTTPException(status_code=400, detail="messageId / emoji / senderId 不能为空")
 
-    # 读取当前 reactions
-    msg = db_get_message(message_id)
-    if not msg:
-        raise HTTPException(status_code=404, detail="消息不存在")
+    # 在单个连接的事务中原子完成读-改-写，防止并发丢失更新
+    conn = get_db_conn()
+    try:
+        # BEGIN IMMEDIATE 获取写锁，防止并发竞争
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT reactions FROM chat_messages WHERE id = ?", (message_id,)
+        ).fetchone()
 
-    reactions = msg["reactions"]
-    if emoji not in reactions:
-        reactions[emoji] = []
+        if not row:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail="消息不存在")
 
-    if sender_id in reactions[emoji]:
-        reactions[emoji].remove(sender_id)
-        if not reactions[emoji]:
-            del reactions[emoji]
-        action = "removed"
-    else:
-        reactions[emoji].append(sender_id)
-        action = "added"
+        reactions = json.loads(row["reactions"] or "{}")
 
-    # 持久化
-    db_update_reactions(message_id, reactions)
+        if emoji not in reactions:
+            reactions[emoji] = []
 
-    # 广播
+        if sender_id in reactions[emoji]:
+            reactions[emoji].remove(sender_id)
+            if not reactions[emoji]:
+                del reactions[emoji]
+            action = "removed"
+        else:
+            reactions[emoji].append(sender_id)
+            action = "added"
+
+        conn.execute(
+            "UPDATE chat_messages SET reactions = ? WHERE id = ?",
+            (json.dumps(reactions, ensure_ascii=False), message_id),
+        )
+        conn.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"更新 Reaction 失败: {e}") from e
+    finally:
+        conn.close()
+
+    # 广播（排除发起者，发起者通过 POST 响应数据自行校准本地状态）
     broadcast_payload = {
         "type": "reaction_update",
         "messageId": message_id,
@@ -898,9 +923,10 @@ async def post_reaction(body: dict = Body(default_factory=dict)):
         "action": action,
         "reactions": reactions,
     }
-    await presence_manager.broadcast(broadcast_payload)
+    await presence_manager.broadcast(broadcast_payload, exclude_identity=sender_id)
 
     return JSONResponse({"ok": True, "action": action, "reactions": reactions})
+
 
 
 @app.get("/api/user/profile")

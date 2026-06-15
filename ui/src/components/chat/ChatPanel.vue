@@ -1,8 +1,9 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import BaseAvatar from '../common/BaseAvatar.vue';
-import { chatStore, shouldGroupWithPrev, toggleReaction } from '../../stores/chatStore.js';
+import { chatStore, shouldGroupWithPrev, toggleReaction, applyServerReactionUpdate } from '../../stores/chatStore.js';
 import { profileStore } from '../../stores/profileStore.js';
+import { presenceStore } from '../../stores/presenceStore.js';
 import { renderMessageContent, QUICK_REACTIONS, EMOJI_LIST } from '../../shared/messageRenderer.js';
 import { appStore } from '../../stores/appStore.js';
 import { silentSyncReaction } from '../../shared/apiClient.js';
@@ -191,17 +192,35 @@ function insertEmoji(emojiChar) {
 }
 
 // ─── Reaction ────────────────────────────────────────────────────────────────
-function handleReaction(msgId, emoji) {
-  const myId = profileStore.userId;
+/**
+ * 获取当前用户在 reaction 中使用的 ID。
+ * 优先使用 Presence identity（与消息的 senderId 保持一致），
+ * 未连接时回退到 profileStore.userId。
+ */
+function getSelfReactionId() {
+  return presenceStore.identity || profileStore.userId;
+}
+
+async function handleReaction(msgId, emoji) {
+  const myId = getSelfReactionId();
+  // 乐观更新：立即在本地修改，提供即时反馈
   toggleReaction(msgId, emoji, myId);
 
-  // 同步到服务器（服务器负责广播给其他在线客户端）
-  silentSyncReaction({
+  // 同步到服务器，用响应结果做最终校准（防止并发快速点击状态不一致）
+  const result = await silentSyncReaction({
     messageId: msgId,
     emoji,
     senderId: myId,
     channelId: chatStore.currentChannelId || '',
   });
+
+  // 用服务端权威状态校准本地（服务端已排除了广播给自己，所以自己需要从响应中同步）
+  if (result?.reactions !== undefined) {
+    applyServerReactionUpdate({
+      messageId: msgId,
+      reactions: result.reactions,
+    });
+  }
 
   closeReactionPicker();
 }
@@ -211,7 +230,8 @@ function reactionCount(reactions, emoji) {
 }
 
 function isMineReaction(reactions, emoji) {
-  return (reactions?.[emoji] || []).includes(profileStore.userId);
+  const myId = getSelfReactionId();
+  return (reactions?.[emoji] || []).includes(myId);
 }
 
 // ─── 富文本渲染 ───────────────────────────────────────────────────────────────

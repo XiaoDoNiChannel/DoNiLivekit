@@ -2,6 +2,16 @@ import { reactive } from 'vue';
 import { fetchChatHistory, clearChatHistory } from '../shared/apiClient.js';
 import { logError } from '../shared/errors.js';
 
+// 获取当前用户 identity（延迟导入避免循环依赖）
+function getSelfIdentity() {
+  try {
+    // 优先用 sessionStorage 中的 Presence identity
+    const presenceIdentity = sessionStorage.getItem('lk_presence_identity');
+    if (presenceIdentity) return presenceIdentity;
+  } catch (_) {}
+  return '';
+}
+
 // ─── 常量 ──────────────────────────────────────────────────────────────────────
 const CHAT_STORAGE_PREFIX = 'donichannel_chat_v1_';
 const MAX_MESSAGES_PER_CHANNEL = 200;
@@ -270,14 +280,17 @@ export async function loadServerHistory(channelId, { limit = 50 } = {}) {
     // 当前频道可能已切换，只处理当前频道
     if (chatStore.currentChannelId !== cleanId) return;
 
+    // 获取当前用户 identity，用于正确标记 isSelf
+    const selfId = getSelfIdentity();
+
     // 合并：去掉本地已有的（按 id 去重），服务器消息插到头部
     const localIds = new Set(chatStore.messages.map((m) => m.id));
     const newMsgs = serverMsgs
       .filter((m) => !localIds.has(m.id))
       .map((m) => ({
         ...m,
-        // isSelf 由客户端根据自己的 senderId 判断（服务器统一返回 false）
-        isSelf: m.isSelf || false,
+        // 根据当前用户 identity 重新判断 isSelf（服务端统一返回 false）
+        isSelf: selfId ? m.senderId === selfId : (m.isSelf || false),
         reactions: m.reactions || {},
       }));
 
@@ -305,28 +318,80 @@ export async function loadServerHistory(channelId, { limit = 50 } = {}) {
 export function applyServerChatMessage(serverMsg, selfIdentity) {
   if (!serverMsg || !serverMsg.channelId) return;
 
-  // 只处理当前频道的消息
-  if (serverMsg.channelId !== chatStore.currentChannelId) return;
+  const targetChannelId = serverMsg.channelId;
 
-  // 去重：已存在的消息不重复添加
-  if (chatStore.messages.some((m) => m.id === serverMsg.id)) return;
+  // 去重检查函数
+  function isDuplicate(msgList) {
+    return msgList.some((m) => m.id === serverMsg.id);
+  }
 
-  addChatMessage({
-    ...serverMsg,
-    isSelf: serverMsg.senderId === selfIdentity,
-  });
+  if (targetChannelId === chatStore.currentChannelId) {
+    // 属于当前频道：直接写入当前消息列表
+    if (isDuplicate(chatStore.messages)) return;
+    addChatMessage({
+      ...serverMsg,
+      isSelf: serverMsg.senderId === selfIdentity,
+    });
+  } else {
+    // 属于其他频道：写入内存缓存（而不是丢弃），避免切换频道后漏消息
+    if (!chatStore._cache[targetChannelId]) {
+      // 该频道尚未在缓存中，不加载历史（避免不必要的 IO），只初始化空缓存
+      chatStore._cache[targetChannelId] = [];
+    }
+    const cacheList = chatStore._cache[targetChannelId];
+    if (isDuplicate(cacheList)) return;
+    const msg = {
+      id: serverMsg.id || generateId(),
+      channelId: targetChannelId,
+      senderId: serverMsg.senderId || '',
+      senderName: serverMsg.senderName || '未知用户',
+      senderColor: serverMsg.senderColor || '#5865f2',
+      senderPreset: serverMsg.senderPreset || '',
+      senderAvatarUrl: serverMsg.senderAvatarUrl ?? null,
+      content: serverMsg.content || '',
+      timestamp: serverMsg.timestamp || Date.now(),
+      reactions: serverMsg.reactions || {},
+      isSelf: serverMsg.senderId === selfIdentity,
+    };
+    cacheList.push(msg);
+    // 超过上限时裁剪旧消息
+    if (cacheList.length > MAX_MESSAGES_PER_CHANNEL) {
+      cacheList.splice(0, cacheList.length - MAX_MESSAGES_PER_CHANNEL);
+    }
+    // 持久化到 localStorage
+    try {
+      localStorage.setItem(storageKey(targetChannelId), JSON.stringify(cacheList));
+    } catch (_) {}
+  }
 }
 
 /**
  * 将来自服务器广播的 reaction_update 应用到本地消息。
- * @param {{ messageId, reactions }} update
+ * 同时处理当前频道和内存缓存中其他频道的消息。
+ * @param {{ messageId, reactions, channelId }} update
  */
 export function applyServerReactionUpdate(update) {
   if (!update || !update.messageId) return;
 
+  // 优先在当前频道消息中查找
   const msg = chatStore.messages.find((m) => m.id === update.messageId);
-  if (!msg) return;
+  if (msg) {
+    msg.reactions = update.reactions || {};
+    persistCurrentChannel();
+    return;
+  }
 
-  msg.reactions = update.reactions || {};
-  persistCurrentChannel();
+  // 在其他频道的缓存中查找
+  for (const channelId in chatStore._cache) {
+    const cacheList = chatStore._cache[channelId];
+    const cachedMsg = cacheList.find((m) => m.id === update.messageId);
+    if (cachedMsg) {
+      cachedMsg.reactions = update.reactions || {};
+      // 同步持久化到 localStorage
+      try {
+        localStorage.setItem(storageKey(channelId), JSON.stringify(cacheList));
+      } catch (_) {}
+      return;
+    }
+  }
 }
