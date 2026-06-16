@@ -1,4 +1,5 @@
 import { reactive } from 'vue';
+import { profileStore } from './profileStore.js';
 import { fetchChatHistory, clearChatHistory } from '../shared/apiClient.js';
 import { logError } from '../shared/errors.js';
 
@@ -10,6 +11,7 @@ const GROUPING_THRESHOLD_MS = 5 * 60 * 1000;
 // 历史补偿节流：同一频道短时间多次触发时只允许一次请求。
 const HISTORY_REFRESH_MIN_INTERVAL_MS = 3000;
 const historyRefreshState = {};
+const CHAT_NOTIFICATION_STORAGE_KEY = 'donichannel_chat_notifications_v1';
 
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
 function generateId() {
@@ -30,6 +32,84 @@ function safeJsonParse(raw) {
 
 function normalizeChannelId(channelId) {
   return String(channelId || 'lobby').trim() || 'lobby';
+}
+
+
+function getLocalStorageItem(key, fallback = '') {
+  try {
+    if (typeof localStorage === 'undefined') return fallback;
+    return localStorage.getItem(key) || fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function getSelfMentionKeys() {
+  return new Set([
+    profileStore.userId,
+    profileStore.displayName,
+    getLocalStorageItem('lk_username'),
+  ].map((value) => String(value || '').trim()).filter(Boolean));
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isMentionTokenBoundaryPattern(name) {
+  return new RegExp(`(^|[\\s([{（])@${escapeRegExp(name)}(?=$|[\\s.,;:!?，。！？、)\\]}）])`, 'i');
+}
+
+function normalizeNotificationRecord(raw = {}) {
+  return {
+    unread: Math.max(0, Number(raw.unread || 0)),
+    mentions: Math.max(0, Number(raw.mentions || 0)),
+    lastReadAt: Number(raw.lastReadAt || 0),
+    lastMessageAt: Number(raw.lastMessageAt || 0),
+    lastMentionAt: Number(raw.lastMentionAt || 0),
+  };
+}
+
+function loadNotificationState() {
+  try {
+    if (typeof localStorage === 'undefined') return {};
+    const raw = localStorage.getItem(CHAT_NOTIFICATION_STORAGE_KEY);
+    const parsed = safeJsonParse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+
+    const result = {};
+    Object.entries(parsed).forEach(([channelId, record]) => {
+      const cleanId = normalizeChannelId(channelId);
+      result[cleanId] = normalizeNotificationRecord(record);
+    });
+    return result;
+  } catch (_) {
+    return {};
+  }
+}
+
+function persistNotificationState() {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(CHAT_NOTIFICATION_STORAGE_KEY, JSON.stringify(chatStore.notifications || {}));
+  } catch (e) {
+    console.warn('[chatStore] 未读/提及状态持久化失败', e);
+  }
+}
+
+function ensureNotificationRecord(channelId) {
+  const cleanId = normalizeChannelId(channelId);
+  if (!chatStore.notifications[cleanId]) {
+    chatStore.notifications[cleanId] = normalizeNotificationRecord();
+  }
+  return chatStore.notifications[cleanId];
+}
+
+function shouldCountUnreadForChannel(channelId) {
+  const cleanId = normalizeChannelId(channelId);
+  const isCurrent = chatStore.currentChannelId === cleanId;
+  const pageFocused = typeof document !== 'undefined' && !document.hidden && document.hasFocus?.();
+  return !isCurrent || !pageFocused;
 }
 
 function normalizeMessage(raw = {}, fallbackChannelId = 'lobby', selfId = '') {
@@ -88,6 +168,10 @@ export const chatStore = reactive({
   _cache: {},
   /** Reaction 可能先于消息到达；先暂存，等消息出现后再补应用 */
   _pendingReactions: {},
+  /** 每个频道的未读与 @ 提及计数。 */
+  notifications: loadNotificationState(),
+  /** 通知状态变更时间戳，供组件 watch 使用。 */
+  notificationUpdatedAt: Date.now(),
 });
 
 // ─── 持久化 ───────────────────────────────────────────────────────────────────
@@ -179,6 +263,75 @@ function upsertMessageToChannel(message, channelId) {
 
   persistChannel(cleanId);
   return message;
+}
+
+
+export function isMessageMentioningSelf(message) {
+  const content = String(message?.content || '');
+  if (!content) return false;
+
+  // @all / @here 对当前频道所有人有效。
+  if (/(^|[\s([{（])@(all|here)(?=$|[\s.,;:!?，。！？、)\]}）])/i.test(content)) {
+    return true;
+  }
+
+  const keys = Array.from(getSelfMentionKeys());
+  for (const key of keys) {
+    if (!key) continue;
+    if (content.includes(`<@${key}>`)) return true;
+  }
+
+  const displayName = String(profileStore.displayName || getLocalStorageItem('lk_username') || '').trim();
+  if (displayName && isMentionTokenBoundaryPattern(displayName).test(content)) return true;
+
+  return false;
+}
+
+function noteIncomingMessage(message, channelId) {
+  const cleanId = normalizeChannelId(channelId || message.channelId);
+  if (!cleanId || message?.isSelf) return;
+
+  const isMention = isMessageMentioningSelf(message);
+  if (!isMention && !shouldCountUnreadForChannel(cleanId)) return;
+
+  const record = ensureNotificationRecord(cleanId);
+  const ts = Number(message.timestamp || Date.now());
+  record.lastMessageAt = Math.max(record.lastMessageAt || 0, ts);
+
+  if (shouldCountUnreadForChannel(cleanId)) {
+    record.unread += 1;
+  }
+
+  if (isMention) {
+    record.mentions += 1;
+    record.lastMentionAt = Math.max(record.lastMentionAt || 0, ts);
+  }
+
+  chatStore.notificationUpdatedAt = Date.now();
+  persistNotificationState();
+}
+
+export function getChannelNotification(channelId) {
+  return ensureNotificationRecord(channelId);
+}
+
+export function markChannelRead(channelId) {
+  const cleanId = normalizeChannelId(channelId || chatStore.currentChannelId || 'lobby');
+  const record = ensureNotificationRecord(cleanId);
+  if (record.unread === 0 && record.mentions === 0) {
+    record.lastReadAt = Date.now();
+    return;
+  }
+
+  record.unread = 0;
+  record.mentions = 0;
+  record.lastReadAt = Date.now();
+  chatStore.notificationUpdatedAt = Date.now();
+  persistNotificationState();
+}
+
+export function getTotalMentionCount() {
+  return Object.values(chatStore.notifications || {}).reduce((sum, record) => sum + Math.max(0, Number(record?.mentions || 0)), 0);
 }
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
@@ -299,7 +452,7 @@ export function shouldGroupWithPrev(prevMsg, currMsg) {
   return currMsg.timestamp - prevMsg.timestamp < GROUPING_THRESHOLD_MS;
 }
 
-export function loadServerHistory(channelId, { limit = 50 } = {}) {
+export function loadServerHistory(channelId, { limit = 50, force = false } = {}) {
   const cleanId = String(channelId || '').trim();
   if (!cleanId) return Promise.resolve(false);
 
@@ -313,7 +466,7 @@ export function loadServerHistory(channelId, { limit = 50 } = {}) {
   // 1. 请求正在进行时，后续触发直接复用同一个 Promise。
   // 2. 同一频道 3 秒内不再发起新的 GET /api/chat/history。
   if (state.inFlight) return state.inFlight;
-  if (now - state.lastStartedAt < HISTORY_REFRESH_MIN_INTERVAL_MS) {
+  if (!force && now - state.lastStartedAt < HISTORY_REFRESH_MIN_INTERVAL_MS) {
     return Promise.resolve(false);
   }
 
@@ -359,7 +512,15 @@ export function applyServerChatMessage(serverMsg, selfIdentityOrUserId = '') {
   const msg = normalizeMessage(serverMsg, cleanId, selfIdentityOrUserId);
   msg.isSelf = msg.isSelf || (!!selfIdentityOrUserId && (msg.senderId === selfIdentityOrUserId || msg.senderUserId === selfIdentityOrUserId || msg.senderIdentity === selfIdentityOrUserId));
   msg.status = 'sent';
-  upsertMessageToChannel(msg, cleanId);
+  msg.isMentioned = !msg.isSelf && isMessageMentioningSelf(msg);
+
+  const targetList = getChannelList(cleanId);
+  const existed = !!(findMessageInList(targetList, msg.id) || findMessageInList(targetList, msg.clientMessageId) || findMessageInList(targetList, msg.serverMessageId));
+  const saved = upsertMessageToChannel(msg, cleanId);
+
+  if (!existed && saved && !saved.isSelf) {
+    noteIncomingMessage(saved, cleanId);
+  }
 }
 
 export function applyServerReactionUpdate(update) {

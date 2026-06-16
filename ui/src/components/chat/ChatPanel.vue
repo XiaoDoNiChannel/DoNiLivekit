@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import BaseAvatar from '../common/BaseAvatar.vue';
-import { chatStore, shouldGroupWithPrev, toggleReaction } from '../../stores/chatStore.js';
+import { chatStore, shouldGroupWithPrev, toggleReaction, isMessageMentioningSelf, markChannelRead, getTotalMentionCount } from '../../stores/chatStore.js';
 import { profileStore } from '../../stores/profileStore.js';
 import { presenceStore } from '../../stores/presenceStore.js';
 import { renderMessageContent, QUICK_REACTIONS, EMOJI_LIST } from '../../shared/messageRenderer.js';
@@ -17,6 +17,15 @@ const imageInputEl = ref(null);
 const isUploadingImage = ref(false);
 const previewImageUrl = ref('');
 const pendingImages = ref([]);
+const baseDocumentTitle = typeof document !== 'undefined' ? document.title : 'DoNiChannel';
+let titleFlashTimer = null;
+let titleFlashOn = false;
+
+// ─── @ 提及输入状态 ───────────────────────────────────────────────────────────
+const mentionQuery = ref(null);
+const mentionActiveIndex = ref(0);
+let mentionRange = null;
+const selectedMentionMap = new Map();
 
 // ─── Emoji 选择器 ──────────────────────────────────────────────────────────────
 const showEmojiPicker = ref(false);
@@ -71,6 +80,9 @@ function onDocumentClick(e) {
   if (!e.target.closest('.emoji-picker') && !e.target.closest('.emoji-toggle-btn')) {
     showEmojiPicker.value = false;
   }
+  if (!e.target.closest('.mention-picker') && e.target !== textareaEl.value) {
+    closeMentionPicker();
+  }
   if (!e.target.closest('.msg-context-menu')) {
     contextMenuMsgId.value = null;
   }
@@ -81,17 +93,41 @@ function onDocumentKeydown(e) {
     reactionPickerMsgId.value = null;
     contextMenuMsgId.value = null;
     showEmojiPicker.value = false;
+    closeMentionPicker();
   }
 }
 
 onMounted(() => {
   document.addEventListener('click', onDocumentClick, true);
   document.addEventListener('keydown', onDocumentKeydown);
-  nextTick(() => resizeComposer());
+  window.addEventListener('focus', handleWindowFocus);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+  if (typeof window !== 'undefined') {
+    window.__doniMentionDebug = () => ({
+      text: textareaEl.value?.value || inputText.value,
+      selectionStart: textareaEl.value?.selectionStart ?? null,
+      mentionQuery: mentionQuery.value,
+      mentionRange,
+      users: mentionUsers.value.map((user) => ({ id: user.id, userId: user.userId, identity: user.identity, displayName: user.displayName, isSelf: user.isSelf, source: user.source })),
+      renderUsers: mentionRenderUsers.value.map((user) => ({ id: user.id, userId: user.userId, identity: user.identity, displayName: user.displayName, source: user.source })),
+      filtered: filteredMentionCandidates.value.map((user) => ({ id: user.id, displayName: user.displayName, source: user.source })),
+      menuCandidates: mentionMenuCandidates.value.map((user) => ({ id: user.id, displayName: user.displayName, source: user.source })),
+      show: showMentionMenu.value,
+    });
+  }
+  nextTick(() => {
+    resizeComposer();
+    scrollToBottom(true);
+    markVisibleChannelRead();
+  });
 });
 onUnmounted(() => {
   document.removeEventListener('click', onDocumentClick, true);
   document.removeEventListener('keydown', onDocumentKeydown);
+  window.removeEventListener('focus', handleWindowFocus);
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
+  stopTitleFlash();
+  if (typeof window !== 'undefined' && window.__doniMentionDebug) delete window.__doniMentionDebug;
   clearPendingImages();
 });
 
@@ -127,15 +163,413 @@ function scrollToBottom(force = false) {
   }
 }
 
-watch(messages, () => scrollToBottom(), { deep: false });
+watch(() => messages.value.length, () => {
+  scrollToBottom();
+  nextTick(markVisibleChannelRead);
+});
+watch(() => chatStore.currentChannelId, () => {
+  nextTick(() => {
+    scrollToBottom(true);
+    markVisibleChannelRead();
+  });
+});
+watch(() => chatStore.notificationUpdatedAt, () => updateTitleFlash());
 
 // ─── 当前频道名 ───────────────────────────────────────────────────────────────
 const channelName = computed(() => appStore.connection.currentChannel || '聊天');
 const isConnected = computed(() => appStore.connection.isConnected);
 
+// ─── @ 提醒与已读状态 ─────────────────────────────────────────────────────────
+function isMentionedMessage(msg) {
+  return !!msg && !msg.isSelf && isMessageMentioningSelf(msg);
+}
+
+function markVisibleChannelRead() {
+  const current = chatStore.currentChannelId || appStore.connection.currentChannel;
+  if (!current) return;
+  if (typeof document !== 'undefined' && document.hidden) return;
+  markChannelRead(current);
+  updateTitleFlash();
+}
+
+function stopTitleFlash() {
+  if (titleFlashTimer) {
+    clearInterval(titleFlashTimer);
+    titleFlashTimer = null;
+  }
+  titleFlashOn = false;
+  if (typeof document !== 'undefined' && document.title !== baseDocumentTitle) {
+    document.title = baseDocumentTitle;
+  }
+}
+
+function updateTitleFlash() {
+  if (typeof document === 'undefined') return;
+  const mentionCount = getTotalMentionCount();
+  const shouldFlash = mentionCount > 0 && (document.hidden || !document.hasFocus?.());
+
+  if (!shouldFlash) {
+    if (mentionCount <= 0 || !document.hidden) stopTitleFlash();
+    return;
+  }
+
+  if (titleFlashTimer) return;
+  titleFlashTimer = setInterval(() => {
+    titleFlashOn = !titleFlashOn;
+    document.title = titleFlashOn ? `有人 @ 你 · ${baseDocumentTitle}` : baseDocumentTitle;
+  }, 1200);
+}
+
+function handleWindowFocus() {
+  markVisibleChannelRead();
+}
+
+function handleVisibilityChange() {
+  if (!document.hidden) {
+    markVisibleChannelRead();
+  } else {
+    updateTitleFlash();
+  }
+}
+
+// ─── @ 提及候选与标准化 ────────────────────────────────────────────────────────
+function cleanMentionText(value) {
+  return String(value || '').trim();
+}
+
+function cleanMentionDisplayName(value, fallback = '') {
+  return cleanMentionText(value || fallback).replace(/[<>\n\r]/g, '').slice(0, 40);
+}
+
+function makeMentionId(candidate) {
+  return cleanMentionText(candidate?.userId || candidate?.identity || candidate?.connectionId || candidate?.id || candidate?.displayName);
+}
+
+function isGeneratedIdentityText(value) {
+  const text = cleanMentionText(value);
+  if (!text) return false;
+  return /^(u|conn|pa|rm)_[a-z0-9_\-]{8,}$/i.test(text) || /^[a-f0-9]{24,}$/i.test(text);
+}
+
+function getCandidateStrongKeys(candidate = {}) {
+  return [
+    candidate.id,
+    candidate.userId,
+    candidate.senderUserId,
+    candidate.senderId,
+    candidate.identity,
+    candidate.senderIdentity,
+    candidate.connectionId,
+  ].map(cleanMentionText).filter(Boolean);
+}
+
+function findPresenceProfile(raw = {}) {
+  const keys = new Set(getCandidateStrongKeys(raw));
+  if (keys.size === 0) return null;
+
+  for (const [key, participant] of Object.entries(presenceStore.participants || {})) {
+    if (!participant) continue;
+    const participantKeys = new Set([key, ...getCandidateStrongKeys(participant)]);
+    for (const candidateKey of keys) {
+      if (participantKeys.has(candidateKey)) return participant;
+    }
+  }
+
+  return null;
+}
+
+function pickReadableMentionName(raw = {}, profile = null, fallback = '') {
+  const candidates = [
+    raw.displayName,
+    raw.senderName,
+    raw.name,
+    profile?.displayName,
+    fallback,
+  ].map(cleanMentionText).filter(Boolean);
+
+  const readable = candidates.find((value) => !isGeneratedIdentityText(value));
+  if (readable) return cleanMentionDisplayName(readable);
+
+  const id = cleanMentionText(raw.userId || raw.senderUserId || raw.senderId || raw.identity || raw.senderIdentity || raw.id || profile?.userId || profile?.identity || fallback);
+  if (!id) return '';
+  return cleanMentionDisplayName(`用户 ${id.slice(0, 8)}`);
+}
+
+function addMentionCandidate(list, raw = {}, extra = {}) {
+  if (!raw) return;
+  const profile = findPresenceProfile(raw);
+  const id = cleanMentionText(
+    raw.userId || raw.senderUserId || raw.senderId || profile?.userId || raw.identity || raw.senderIdentity || profile?.identity || raw.connectionId || raw.id
+  );
+  const displayName = pickReadableMentionName(raw, profile, extra.displayName || id);
+  if (!displayName || !id) return;
+
+  const candidate = {
+    id,
+    userId: cleanMentionText(raw.userId || raw.senderUserId || raw.senderId || profile?.userId || id),
+    identity: cleanMentionText(raw.identity || raw.senderIdentity || profile?.identity || raw.senderId || raw.userId || id),
+    connectionId: cleanMentionText(raw.connectionId || profile?.connectionId || ''),
+    displayName,
+    avatarColor: raw.avatarColor || raw.senderColor || profile?.avatarColor || '#5865f2',
+    avatarPreset: raw.avatarPreset || raw.senderPreset || profile?.avatarPreset || '',
+    avatarUrl: raw.avatarUrl ?? raw.senderAvatarUrl ?? profile?.avatarUrl ?? null,
+    isSelf: !!extra.isSelf,
+    source: extra.source || 'presence',
+  };
+
+  const keys = new Set(getCandidateStrongKeys(candidate));
+  let index = -1;
+  if (keys.size > 0) {
+    index = list.findIndex((item) => getCandidateStrongKeys(item).some((key) => keys.has(key)));
+  }
+  if (index < 0) {
+    index = list.findIndex((item) => cleanMentionText(item.displayName) === cleanMentionText(candidate.displayName));
+  }
+
+  if (index >= 0) {
+    const prev = list[index];
+    const nextDisplayName = isGeneratedIdentityText(candidate.displayName) && prev.displayName
+      ? prev.displayName
+      : candidate.displayName;
+    list[index] = {
+      ...prev,
+      ...candidate,
+      displayName: nextDisplayName,
+      isSelf: prev.isSelf || candidate.isSelf,
+      source: prev.source === 'self' ? 'self' : candidate.source,
+    };
+  } else {
+    list.push(candidate);
+  }
+}
+
+function getCurrentPresenceChannel(currentChannel) {
+  return (presenceStore.channels || []).find((channel) => {
+    const id = cleanMentionText(channel.id || channel.name);
+    const name = cleanMentionText(channel.name || channel.id);
+    return id === currentChannel || name === currentChannel;
+  });
+}
+
+function addLiveKitMentionCandidates(list, currentChannel) {
+  if (typeof window === 'undefined' || typeof window.getLiveKitRoom !== 'function') return;
+  const room = window.getLiveKitRoom();
+  if (!room) return;
+  const roomName = cleanMentionText(room.name || room.roomName || '');
+  if (currentChannel && roomName && roomName !== currentChannel) return;
+
+  const localParticipant = room.localParticipant;
+  if (localParticipant) {
+    addMentionCandidate(list, {
+      userId: localParticipant.identity,
+      identity: localParticipant.identity,
+      displayName: localParticipant.name || localParticipant.identity,
+    }, { source: 'livekit', isSelf: localParticipant.identity === profileStore.userId });
+  }
+
+  room.remoteParticipants?.forEach?.((participant) => {
+    addMentionCandidate(list, {
+      userId: participant.identity,
+      identity: participant.identity,
+      displayName: participant.name || participant.identity,
+    }, { source: 'livekit' });
+  });
+}
+
+// @ 菜单只显示“当前频道里可见的人”：当前用户 + Presence 当前频道成员 + LiveKit 当前房间成员。
+// 不再把 presenceStore.participants 全量在线用户和历史聊天发送者混入菜单，避免出现不在频道的测试账号。
+const mentionUsers = computed(() => {
+  const list = [];
+  const currentChannel = cleanMentionText(chatStore.currentChannelId || appStore.connection.currentChannel || channelName.value);
+
+  addMentionCandidate(list, {
+    userId: profileStore.userId,
+    identity: presenceStore.identity || profileStore.userId,
+    connectionId: presenceStore.connectionId,
+    displayName: profileStore.displayName || localStorage.getItem('lk_username') || '我',
+    avatarColor: profileStore.avatarColor,
+    avatarPreset: profileStore.avatarPreset,
+    avatarUrl: profileStore.avatarUrl,
+  }, { isSelf: true, source: 'self' });
+
+  const currentPresenceChannel = getCurrentPresenceChannel(currentChannel);
+  (currentPresenceChannel?.members || []).forEach((member) => {
+    addMentionCandidate(list, member, { source: 'channel' });
+  });
+
+  addLiveKitMentionCandidates(list, currentChannel);
+
+  const sourceRank = { self: 0, channel: 1, livekit: 2, presence_profile: 3, history: 4 };
+  return list.sort((a, b) => {
+    const selfRank = Number(b.isSelf) - Number(a.isSelf);
+    if (selfRank !== 0) return selfRank;
+    const rank = (sourceRank[a.source] ?? 9) - (sourceRank[b.source] ?? 9);
+    if (rank !== 0) return rank;
+    return a.displayName.localeCompare(b.displayName, 'zh-Hans-CN');
+  });
+});
+
+// 渲染历史消息时可以使用更宽的 userId→displayName 映射，但这个列表不参与 @ 菜单。
+const mentionRenderUsers = computed(() => {
+  const list = [];
+  mentionUsers.value.forEach((user) => addMentionCandidate(list, user, { source: user.source, isSelf: user.isSelf }));
+
+  Object.values(presenceStore.participants || {}).forEach((participant) => {
+    addMentionCandidate(list, participant, { source: 'presence_profile' });
+  });
+
+  (chatStore.messages || []).forEach((msg) => {
+    addMentionCandidate(list, msg, { source: 'history', isSelf: !!msg.isSelf });
+  });
+
+  Object.values(chatStore._cache || {}).forEach((messagesInChannel) => {
+    (messagesInChannel || []).forEach((msg) => addMentionCandidate(list, msg, { source: 'history', isSelf: !!msg.isSelf }));
+  });
+
+  return list;
+});
+
+const mentionNames = computed(() => {
+  return Array.from(new Set(mentionRenderUsers.value.map((user) => user.displayName).filter(Boolean)));
+});
+
+function mentionMatchesQuery(candidate, query) {
+  const q = cleanMentionText(query).toLowerCase();
+  if (!q) return true;
+  return [candidate.displayName, candidate.userId, candidate.identity]
+    .map((value) => cleanMentionText(value).toLowerCase())
+    .some((value) => value.includes(q));
+}
+
+const filteredMentionCandidates = computed(() => {
+  if (mentionQuery.value === null) return [];
+  return mentionUsers.value
+    .filter((candidate) => mentionMatchesQuery(candidate, mentionQuery.value))
+    .slice(0, 8);
+});
+
+const mentionMenuCandidates = computed(() => {
+  if (mentionQuery.value === null) return [];
+  if (filteredMentionCandidates.value.length > 0) return filteredMentionCandidates.value;
+
+  // 兜底只回退到当前频道候选，避免把历史用户/不在频道的测试账号显示出来。
+  return mentionUsers.value.slice(0, 8);
+});
+
+const showMentionMenu = computed(() => mentionQuery.value !== null);
+
+function closeMentionPicker() {
+  mentionQuery.value = null;
+  mentionActiveIndex.value = 0;
+  mentionRange = null;
+}
+
+function getMentionTriggerAtCursor(valueOverride = null, selectionStartOverride = null) {
+  const el = textareaEl.value;
+  const text = valueOverride !== null && valueOverride !== undefined
+    ? String(valueOverride)
+    : inputText.value;
+  const pos = Number.isFinite(selectionStartOverride)
+    ? selectionStartOverride
+    : (el?.selectionStart ?? text.length);
+  const before = text.slice(0, pos);
+  const match = before.match(/(^|[\s([{（])@([^\s@<>\n\r]*)$/u);
+  if (!match) return null;
+
+  const prefix = match[1] || '';
+  const query = match[2] || '';
+  const start = before.length - query.length - 1;
+  if (start > 0 && prefix === '') return null;
+
+  return { start, end: pos, query };
+}
+
+function updateMentionState(eventOrOptions = null) {
+  let valueOverride = null;
+  let selectionStartOverride = null;
+
+  if (eventOrOptions?.target) {
+    valueOverride = eventOrOptions.target.value;
+    selectionStartOverride = eventOrOptions.target.selectionStart;
+    // 某些环境下自定义 @input 回调会早于 v-model 更新；这里主动同步，避免第一次输入 @ 时读到旧值。
+    inputText.value = valueOverride;
+  } else if (eventOrOptions && typeof eventOrOptions === 'object') {
+    if ('value' in eventOrOptions) valueOverride = eventOrOptions.value;
+    if ('selectionStart' in eventOrOptions) selectionStartOverride = eventOrOptions.selectionStart;
+  }
+
+  const trigger = getMentionTriggerAtCursor(valueOverride, selectionStartOverride);
+  if (!trigger) {
+    closeMentionPicker();
+    return;
+  }
+
+  mentionRange = trigger;
+  mentionQuery.value = trigger.query;
+  if (mentionActiveIndex.value >= mentionMenuCandidates.value.length) {
+    mentionActiveIndex.value = 0;
+  }
+}
+
+function insertMentionCandidate(candidate) {
+  if (!candidate) return;
+  const el = textareaEl.value;
+  const range = mentionRange || getMentionTriggerAtCursor();
+  if (!el || !range) return;
+
+  const displayName = cleanMentionDisplayName(candidate.displayName, candidate.id);
+  if (!displayName) return;
+
+  const before = inputText.value.slice(0, range.start);
+  const after = inputText.value.slice(range.end);
+  const spacer = after.startsWith(' ') || after.length === 0 ? '' : ' ';
+  const mentionText = `@${displayName}${spacer}`;
+  inputText.value = before + mentionText + after;
+
+  const mentionId = makeMentionId(candidate);
+  if (mentionId) selectedMentionMap.set(displayName, mentionId);
+
+  const caret = before.length + mentionText.length;
+  closeMentionPicker();
+  nextTick(() => {
+    resizeComposer(el);
+    el.focus();
+    el.setSelectionRange(caret, caret);
+  });
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeMentionsForSending(rawText) {
+  let text = String(rawText || '');
+  const candidates = [...mentionUsers.value];
+
+  for (const [displayName, id] of selectedMentionMap.entries()) {
+    addMentionCandidate(candidates, { displayName, userId: id, identity: id }, { source: 'selected' });
+  }
+
+  const unique = [];
+  candidates.forEach((candidate) => addMentionCandidate(unique, candidate, { isSelf: candidate.isSelf, source: candidate.source }));
+
+  unique
+    .filter((candidate) => makeMentionId(candidate) && candidate.displayName)
+    .sort((a, b) => b.displayName.length - a.displayName.length)
+    .forEach((candidate) => {
+      const displayName = cleanMentionDisplayName(candidate.displayName);
+      const id = makeMentionId(candidate);
+      if (!displayName || !id) return;
+      const pattern = new RegExp(`(^|[\\s([{（])@${escapeRegExp(displayName)}(?=$|[\\s.,;:!?，。！？、)\\]}）])`, 'g');
+      text = text.replace(pattern, `$1<@${id}>`);
+    });
+
+  return text;
+}
+
 // ─── 发送消息 ─────────────────────────────────────────────────────────────────
 async function handleSend() {
-  const text = inputText.value.trim();
+  const text = normalizeMentionsForSending(inputText.value.trim());
   const imagesToSend = [...pendingImages.value];
   if (!text && imagesToSend.length === 0) return;
   if (!isConnected.value || isUploadingImage.value) return;
@@ -143,6 +577,8 @@ async function handleSend() {
   if (text) {
     emit('send', text);
     inputText.value = '';
+    selectedMentionMap.clear();
+    closeMentionPicker();
   }
 
   if (imagesToSend.length > 0) {
@@ -308,6 +744,29 @@ function onMessageContentClick(event) {
 }
 
 function handleKeydown(e) {
+  if (showMentionMenu.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      mentionActiveIndex.value = (mentionActiveIndex.value + 1) % Math.max(mentionMenuCandidates.value.length, 1);
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      mentionActiveIndex.value = (mentionActiveIndex.value - 1 + Math.max(mentionMenuCandidates.value.length, 1)) % Math.max(mentionMenuCandidates.value.length, 1);
+      return;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      insertMentionCandidate(mentionMenuCandidates.value[mentionActiveIndex.value]);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMentionPicker();
+      return;
+    }
+  }
+
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     handleSend();
@@ -375,6 +834,28 @@ function resizeComposer(el = textareaEl.value) {
 
 function autoResize(e) {
   resizeComposer(e.target);
+}
+
+function refreshMentionStateFromTextarea() {
+  const el = textareaEl.value;
+  if (!el) return;
+  updateMentionState({
+    value: el.value,
+    selectionStart: el.selectionStart,
+  });
+}
+
+function handleComposerInput(e) {
+  if (e?.target) inputText.value = e.target.value;
+  autoResize(e);
+  updateMentionState(e);
+  // 再补一轮微任务读取真实 textarea 值，兼容输入法/浏览器事件顺序差异。
+  queueMicrotask(refreshMentionStateFromTextarea);
+}
+
+function handleComposerCaretMove(e) {
+  updateMentionState(e);
+  queueMicrotask(refreshMentionStateFromTextarea);
 }
 
 // ─── Emoji 插入 ───────────────────────────────────────────────────────────────
@@ -514,7 +995,11 @@ function reactionTitle(users, emoji) {
 
 // ─── 富文本渲染 ───────────────────────────────────────────────────────────────
 function renderContent(content) {
-  return renderMessageContent(content);
+  return renderMessageContent(content, {
+    names: mentionNames.value,
+    users: mentionRenderUsers.value,
+    selfUserIds: [profileStore.userId, presenceStore.userId, presenceStore.identity, presenceStore.connectionId],
+  });
 }
 
 // ─── 时间格式化 ───────────────────────────────────────────────────────────────
@@ -561,7 +1046,7 @@ function formatFullTime(ts) {
         v-for="(msg, idx) in groupedMessages"
         :key="msg.id"
         class="msg-row group relative flex items-start gap-3 px-2 py-0.5 rounded hover:bg-white/[0.04] transition-colors duration-100"
-        :class="{ 'mt-4': !msg.isGrouped, 'mt-0.5': msg.isGrouped }"
+        :class="{ 'mt-4': !msg.isGrouped, 'mt-0.5': msg.isGrouped, 'msg-row-mentioned': isMentionedMessage(msg) }"
         @mouseenter="onMsgMouseenter(msg.id)"
         @mouseleave="onMsgMouseleave"
         @contextmenu.prevent="openMessageContextMenu(msg.id)"
@@ -673,7 +1158,41 @@ function formatFullTime(ts) {
 
     <!-- 输入区 -->
     <div class="px-3 pb-3 pt-2 shrink-0">
-      <div class="relative flex flex-col bg-[#383a40] rounded-xl border border-white/5 focus-within:border-[#5865f2]/50 transition-colors overflow-hidden">
+      <div class="relative flex flex-col bg-[#383a40] rounded-xl border border-white/5 focus-within:border-[#5865f2]/50 transition-colors overflow-visible">
+        <div
+          v-if="showMentionMenu"
+          class="mention-picker absolute left-2 right-2 bottom-full mb-2 bg-[#2b2d31] border border-white/10 rounded-xl shadow-2xl z-50 overflow-hidden"
+          @mousedown.prevent
+        >
+          <div class="px-3 py-2 text-[11px] font-semibold text-[#949ba4] border-b border-white/5">选择要 @ 的成员</div>
+          <div
+            v-if="mentionMenuCandidates.length === 0"
+            class="px-3 py-3 text-xs text-[#6d6f78]"
+          >当前没有可提及成员</div>
+          <button
+            v-for="(candidate, index) in mentionMenuCandidates"
+            :key="candidate.id + '-' + candidate.displayName"
+            type="button"
+            class="mention-candidate w-full flex items-center gap-2 px-3 py-2 text-left transition-colors"
+            :class="index === mentionActiveIndex ? 'bg-[#5865f2]/20 text-white' : 'text-[#dbdee1] hover:bg-white/5'"
+            @mouseenter="mentionActiveIndex = index"
+            @click.stop="insertMentionCandidate(candidate)"
+          >
+            <BaseAvatar
+              :name="candidate.displayName"
+              :color="candidate.avatarColor"
+              :preset="candidate.avatarPreset"
+              :avatar-url="candidate.avatarUrl"
+              size="sm"
+            />
+            <div class="min-w-0 flex-1">
+              <div class="text-sm font-semibold truncate">@{{ candidate.displayName }} <span v-if="candidate.isSelf" class="text-[10px] text-[#949ba4] font-normal">我</span></div>
+              <div class="text-[10px] text-[#6d6f78] truncate">{{ candidate.userId || candidate.identity }}</div>
+            </div>
+            <div class="text-[10px] text-[#6d6f78]">Enter</div>
+          </button>
+        </div>
+
         <div v-if="pendingImages.length > 0" class="pending-image-strip flex gap-2 px-3 pt-3 pb-1 overflow-x-auto custom-scroll">
           <div
             v-for="item in pendingImages"
@@ -700,7 +1219,13 @@ function formatFullTime(ts) {
           :disabled="!isConnected"
           rows="1"
           @keydown="handleKeydown"
-          @input="autoResize"
+          @input="handleComposerInput"
+          @click="handleComposerCaretMove"
+          @focus="handleComposerCaretMove"
+          @keyup="handleComposerCaretMove"
+          @mouseup="handleComposerCaretMove"
+          @select="handleComposerCaretMove"
+          @compositionend="handleComposerInput"
           @paste="handlePaste"
         />
 
@@ -786,7 +1311,7 @@ function formatFullTime(ts) {
       </div>
 
       <div class="flex items-center justify-between mt-1 px-1">
-        <span class="text-[10px] text-[#4e5058]">Enter 发送 · Shift+Enter 换行 · Ctrl+V 添加图片预览</span>
+        <span class="text-[10px] text-[#4e5058]">Enter 发送 · Shift+Enter 换行 · @ 提及成员 · Ctrl+V 添加图片预览</span>
         <span v-if="messages.length > 0" class="text-[10px] text-[#4e5058]">{{ messages.length }} 条消息</span>
       </div>
     </div>
@@ -833,6 +1358,18 @@ function formatFullTime(ts) {
   display: block;
 }
 
+
+.mention-picker {
+  max-height: 280px;
+  overflow-y: auto;
+}
+.mention-candidate:first-of-type {
+  margin-top: 2px;
+}
+.mention-candidate:last-of-type {
+  margin-bottom: 2px;
+}
+
 /* 自定义滚动条 */
 .custom-scroll::-webkit-scrollbar { width: 4px; }
 .custom-scroll::-webkit-scrollbar-track { background: transparent; }
@@ -842,6 +1379,13 @@ function formatFullTime(ts) {
 /* 富文本消息内容样式 */
 .msg-row {
   min-width: 0;
+}
+.msg-row-mentioned {
+  background: rgba(250, 166, 26, 0.08);
+  box-shadow: inset 3px 0 0 rgba(250, 166, 26, 0.75);
+}
+.msg-row-mentioned:hover {
+  background: rgba(250, 166, 26, 0.12);
 }
 
 :deep(.msg-content) {
@@ -894,6 +1438,11 @@ function formatFullTime(ts) {
   cursor: pointer;
 }
 :deep(.msg-content .msg-mention:hover) { background: rgba(88, 101, 242, 0.35); }
+:deep(.msg-content .msg-mention-self) {
+  background: rgba(250, 166, 26, 0.22);
+  color: #ffd37a;
+  box-shadow: inset 0 0 0 1px rgba(250, 166, 26, 0.28);
+}
 :deep(.msg-content .msg-mention-weak) {
   color: #9da8ff;
 }

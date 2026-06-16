@@ -81,7 +81,7 @@ export async function clearChatHistory(channelId, { adminToken } = {}) {
 export async function fetchChatHistory(channelId, { limit = 50, before } = {}) {
   let path = `/api/chat/history?channel=${encodeURIComponent(channelId)}&limit=${limit}`;
   if (before != null) path += `&before=${before}`;
-  return apiFetch(path);
+  return apiFetch(path, { cache: 'no-store' });
 }
 
 /**

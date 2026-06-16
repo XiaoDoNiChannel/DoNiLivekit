@@ -149,21 +149,28 @@ function scheduleChatHistoryRefresh(channelId, reason = 'unknown', options = {})
     if (!cleanId) return;
 
     const delayMs = options.delayMs ?? CHAT_HISTORY_DEBOUNCE_MS;
+    const nextForce = !!options.force;
+    const pending = chatHistoryTimers.get(cleanId);
 
-    clearTimeout(chatHistoryTimers.get(cleanId));
-    chatHistoryTimers.set(cleanId, setTimeout(async () => {
+    // 已经排队了关键场景强制刷新时，不允许 focus/visibility 这类普通刷新把它降级覆盖。
+    if (pending?.force && !nextForce) return;
+    if (pending?.timer) clearTimeout(pending.timer);
+
+    const timer = setTimeout(async () => {
         chatHistoryTimers.delete(cleanId);
         try {
-            const refreshed = await loadServerHistory(cleanId);
+            const refreshed = await loadServerHistory(cleanId, { force: nextForce, limit: options.limit || 80 });
             if (refreshed) {
-                console.log('[Chat History] refreshed', { channelId: cleanId, reason });
+                console.log('[Chat History] refreshed', { channelId: cleanId, reason, force: nextForce });
             } else {
-                console.debug?.('[Chat History] skipped by store throttle', { channelId: cleanId, reason });
+                console.debug?.('[Chat History] skipped by store throttle', { channelId: cleanId, reason, force: nextForce });
             }
         } catch (error) {
             logError('runtime/scheduleChatHistoryRefresh 加载聊天历史失败', error, 'warn');
         }
-    }, delayMs));
+    }, delayMs);
+
+    chatHistoryTimers.set(cleanId, { timer, force: nextForce });
 }
 
 function handleChatSubscribed(channelId) {
@@ -670,7 +677,7 @@ function switchChannel(roomName) {
     // 切换频道时先切换本地频道记录；历史加载交给 chat_subscribed 后的稳定时机触发。
     if (roomName) {
         switchChatChannel(roomName);
-        scheduleChatHistoryRefresh(roomName, 'switch_channel', { delayMs: 350 });
+        scheduleChatHistoryRefresh(roomName, 'switch_channel', { force: true, delayMs: 350 });
     }
     return afterAction(
         Promise.resolve(roomConnectionFeature.switchChannel(roomName)).then((result) => {
@@ -685,7 +692,7 @@ function switchChannel(roomName) {
 function connectToChannel(targetRoomName, options) {
     if (targetRoomName) {
         switchChatChannel(targetRoomName);
-        scheduleChatHistoryRefresh(targetRoomName, 'connect_to_channel', { delayMs: 350 });
+        scheduleChatHistoryRefresh(targetRoomName, 'connect_to_channel', { force: true, delayMs: 350 });
     }
     return afterAction(
         Promise.resolve(roomConnectionFeature.connectToChannel(targetRoomName, options)).then((result) => {
