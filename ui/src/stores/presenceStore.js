@@ -14,6 +14,8 @@ export const presenceStore = reactive({
     displayName: '',
     channels: [],
     participants: {},
+    /** 当前正在说话的用户标识集合；{ [identity]: true } */
+    speakingIdentities: {},
     lastMessageType: '',
     lastUpdatedAt: Date.now(),
 });
@@ -27,6 +29,7 @@ export function resetPresenceStore() {
     presenceStore.displayName = '';
     presenceStore.channels = [];
     presenceStore.participants = {};
+    presenceStore.speakingIdentities = {};
     presenceStore.lastMessageType = '';
     presenceStore.lastUpdatedAt = Date.now();
 }
@@ -377,4 +380,25 @@ export function applyPresenceMessage(message) {
 
     presenceStore.lastMessageType = message.type;
     presenceStore.lastUpdatedAt = Date.now();
+}
+
+/**
+ * 将 LiveKit active speaker 集合全量同步到 presence 响应式状态。
+ * 由 runtime.js 桥接层调用，供 ChannelList.vue 等 Vue 组件响应说话高亮。
+ *
+ * @param {Set<string>} activeIdentities - 当前正在说话的用户 identity 集合
+ */
+export function syncSpeakingIdentities(activeIdentities) {
+    const next = {};
+    if (activeIdentities && activeIdentities.size > 0) {
+        activeIdentities.forEach((id) => {
+            if (id) next[id] = true;
+        });
+    }
+    presenceStore.speakingIdentities = next;
+}
+
+/** 清空所有说话状态；用于离开房间/断开连接。 */
+export function clearSpeakingIdentities() {
+    presenceStore.speakingIdentities = {};
 }

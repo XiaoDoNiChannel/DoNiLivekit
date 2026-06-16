@@ -257,6 +257,9 @@ export function createLivekitEventsFeature(context) {
             });
 
             if (hasImmediateChange) context.updateActiveSpeakerUI();
+
+            // 桥接：将 active speaker 集合同步到 presenceStore，供 Vue 组件响应头像高亮
+            context.onActiveSpeakersChanged?.(nextActiveIdentities);
         });
 
         room.on(context.LivekitClient.RoomEvent.TrackMuted, (pub) => { if (pub.kind === 'audio') context.updateParticipantList(); });

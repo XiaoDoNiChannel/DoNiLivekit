@@ -97,6 +97,13 @@ function getMemberAvatarUrl(member) {
   return isSelf(member) ? profileStore.avatarUrl : member.avatarUrl;
 }
 
+function isMemberSpeaking(member) {
+  const identity = getMemberIdentity(member);
+  const userId = member?.userId;
+  const s = presenceStore.speakingIdentities || {};
+  return !!(identity && s[identity]) || !!(userId && s[userId]);
+}
+
 function getVolumeCacheKey(member) {
   return getMemberName(member) || getMemberIdentity(member) || 'unknown';
 }
@@ -207,6 +214,7 @@ function handleSwitchChannel(channel) {
                 :color="getMemberAvatarColor(member)"
                 :preset="getMemberAvatarPreset(member)"
                 :avatarUrl="getMemberAvatarUrl(member)"
+                :isSpeaking="isMemberSpeaking(member)"
                 size="sm"
                 online
               />

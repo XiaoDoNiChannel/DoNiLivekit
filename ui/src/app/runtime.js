@@ -9,6 +9,7 @@ import { sanitizeText } from '../shared/text.js';
 import { logError } from '../shared/errors.js';
 import { appStore, markAppBooted, syncFromRuntimeSnapshot, setLastError } from '../stores/appStore.js';
 import { profileStore, getConnectionId, syncProfileToServer } from '../stores/profileStore.js';
+import { syncSpeakingIdentities, clearSpeakingIdentities } from '../stores/presenceStore.js';
 import { watch } from 'vue';
 import { chatStore, switchChatChannel, loadServerHistory, addChatMessage, markMessageSent, markMessageFailed, applyServerChatMessage, applyServerReactionUpdate, updateChatAvatars } from '../stores/chatStore.js';
 import { setApiBase } from '../shared/apiClient.js';
@@ -368,6 +369,9 @@ const livekitEventsFeature = createLivekitEventsFeature({
         schedulePresenceChannelSync(`livekit_participants_${reason || 'changed'}`, { delayMs: 250, snapshotDelayMs: 450 });
         requestStoreSync();
     },
+    onActiveSpeakersChanged: (activeIdentities) => {
+        syncSpeakingIdentities(activeIdentities);
+    },
 });
 
 const rustMicFeature = createRustMicFeature({
@@ -408,7 +412,13 @@ roomConnectionFeature = createRoomConnectionFeature({
         stopScreenBitrateMonitor: (...args) => screenShareFeature.stopScreenBitrateMonitor(...args),
         hideLocalScreenPreview: (...args) => screenShareFeature.hideLocalScreenPreview(...args),
     },
-    participants: participantsFeature,
+    participants: {
+        ...participantsFeature,
+        clearActiveSpeakers: () => {
+            participantsFeature.clearActiveSpeakers();
+            clearSpeakingIdentities();
+        },
+    },
     remoteAudio: remoteAudioFeature,
     livekitEvents: livekitEventsFeature,
     updateMicList: () => updateMicList(),

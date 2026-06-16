@@ -32,6 +32,10 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  isSpeaking: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 const text = computed(() => props.preset || getUserInitials(props.name));
@@ -49,7 +53,7 @@ const fullAvatarUrl = computed(() => {
 <template>
   <span
     class="base-avatar"
-    :class="[`size-${size}`, { online, muted }]"
+    :class="[`size-${size}`, { online, muted, speaking: isSpeaking }]"
     :style="fullAvatarUrl ? {} : { '--avatar-color': color }"
     :title="name"
   >
@@ -65,3 +69,10 @@ const fullAvatarUrl = computed(() => {
     <span v-if="online" class="base-avatar-status"></span>
   </span>
 </template>
+
+<style scoped>
+.base-avatar.speaking {
+  box-shadow: 0 0 0 2px #23a559, 0 0 10px rgba(35, 165, 89, 0.45);
+  transition: box-shadow 0.15s ease;
+}
+</style>
