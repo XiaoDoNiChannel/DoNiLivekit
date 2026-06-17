@@ -9,7 +9,7 @@ import { sanitizeText } from '../shared/text.js';
 import { logError } from '../shared/errors.js';
 import { appStore, markAppBooted, syncFromRuntimeSnapshot, setLastError } from '../stores/appStore.js';
 import { profileStore, getConnectionId, syncProfileToServer } from '../stores/profileStore.js';
-import { syncSpeakingIdentities, clearSpeakingIdentities } from '../stores/presenceStore.js';
+import { syncSpeakingIdentities, clearSpeakingIdentities, syncVoiceMemberAudioStates, clearVoiceMemberAudioStates, patchVoiceMemberAudioState } from '../stores/presenceStore.js';
 import { watch } from 'vue';
 import { chatStore, switchChatChannel, loadServerHistory, addChatMessage, markMessageSent, markMessageFailed, applyServerChatMessage, applyServerReactionUpdate, updateChatAvatars } from '../stores/chatStore.js';
 import { setApiBase } from '../shared/apiClient.js';
@@ -300,15 +300,184 @@ function ensureAudioContext() {
     return !!remoteAudioContext;
 }
 
+function getParticipantAudioPublications(participant) {
+    try {
+        return Array.from(participant?.audioTrackPublications?.values?.() || []);
+    } catch (_) {
+        return [];
+    }
+}
+
+function normalizeTrackText(value) {
+    return String(value || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+}
+
+function getPublicationText(publication) {
+    return [
+        publication?.trackName,
+        publication?.name,
+        publication?.track?.name,
+        publication?.track?.mediaStreamTrack?.label,
+        publication?.source,
+    ].map(normalizeTrackText).filter(Boolean).join('|');
+}
+
+function isRuntimeScreenAudioPublication(publication) {
+    const source = publication?.source;
+    const screenAudioSource = LivekitClient?.Track?.Source?.ScreenShareAudio;
+    if (source === screenAudioSource || source === 'screen_share_audio' || source === 'screen-share-audio') return true;
+    const text = getPublicationText(publication);
+    return text.includes('screen-share-audio') || text.includes('screenshare-audio');
+}
+
+function isRuntimeAppAudioPublication(publication) {
+    const text = getPublicationText(publication);
+    return [
+        'app-audio',
+        'appaudio',
+        'application-audio',
+        'system-audio',
+        'process-audio',
+        'window-audio',
+    ].some((keyword) => text.includes(keyword));
+}
+
+function isRuntimeMicAudioPublication(publication) {
+    if (!publication) return false;
+    if (isRuntimeScreenAudioPublication(publication) || isRuntimeAppAudioPublication(publication)) return false;
+
+    const source = publication?.source;
+    const micSource = LivekitClient?.Track?.Source?.Microphone;
+    if (source === micSource || source === 'microphone' || source === 'mic') return true;
+
+    // 没有 source 的普通 audio publication，排除特殊音源后兜底视为麦克风。
+    return true;
+}
+
+function isRuntimePublicationMuted(publication) {
+    return !!(
+        publication?.isMuted
+        || publication?.muted
+        || publication?.track?.isMuted
+        || publication?.track?.muted
+        || publication?.track?.mediaStreamTrack?.muted
+    );
+}
+
+function hasLiveRuntimePublicationTrack(publication) {
+    const track = publication?.track;
+    const mediaTrack = track?.mediaStreamTrack;
+    if (!track && !mediaTrack) return false;
+    if (mediaTrack?.readyState === 'ended') return false;
+    return true;
+}
+
+function hasActiveRuntimePublication(publication) {
+    if (!publication) return false;
+    // 停止共享后，某些 LiveKit 版本会短暂保留 publication，但 track 会变空或 ended。
+    // 频道成员列表只应该显示当前仍有真实音轨的共享音量。
+    return hasLiveRuntimePublicationTrack(publication);
+}
+
+function hasAttachedRuntimeAudioSource(identity, source) {
+    const cleanIdentity = String(identity || '');
+    if (!cleanIdentity || typeof document === 'undefined') return false;
+    return Array.from(document.querySelectorAll('[data-audio-identity]')).some((el) => {
+        if (!el?.isConnected) return false;
+        if (el?.dataset?.audioIdentity !== cleanIdentity || el?.dataset?.audioSource !== source) return false;
+        const media = el?.srcObject instanceof MediaStream ? el.srcObject.getAudioTracks?.()[0] : null;
+        if (media && media.readyState === 'ended') return false;
+        return true;
+    });
+}
+
+function buildVoiceMemberAudioState(participant, { isSelf = false } = {}) {
+    const identity = String(participant?.identity || '').trim();
+    const displayName = String(participant?.name || participant?.identity || '').trim();
+    const connectionId = isSelf ? getConnectionId() : '';
+    const stableUserId = isSelf ? String(profileStore.userId || '').trim() : '';
+    const stableName = isSelf ? String(profileStore.displayName || '').trim() : '';
+    const wsIdentity = isSelf ? String(presenceClient.getIdentity?.() || '').trim() : '';
+
+    const publications = getParticipantAudioPublications(participant);
+    const micPublications = publications.filter((publication) => isRuntimeMicAudioPublication(publication) && hasActiveRuntimePublication(publication));
+    const hasMicPublication = micPublications.length > 0;
+    const anyMicPublicationOpen = hasMicPublication && micPublications.some((publication) => !isRuntimePublicationMuted(publication));
+    const livekitSaysMicEnabled = participant?.isMicrophoneEnabled === true;
+    const rustSaysMicEnabled = isSelf && !!rustMicFeature.getIsMicOn?.();
+
+    // 根源修复：开麦状态只用于显示“能不能听到这个人的麦克风”。
+    // 本地用户优先合并 Rust 麦克风状态、LiveKit isMicrophoneEnabled、实际 audio publication；
+    // 避免只看某一个状态导致“我明明开麦却显示闭麦”。
+    const micOpen = !!(rustSaysMicEnabled || livekitSaysMicEnabled || anyMicPublicationOpen);
+
+    const hasLocalAppAudioTrack = !!(
+        localAppAudioPublication
+        && hasActiveRuntimePublication(localAppAudioPublication)
+    );
+    const hasAppAudio = isSelf
+        ? !!(isAppAudioSharing && hasLocalAppAudioTrack)
+        : publications.some((publication) => isRuntimeAppAudioPublication(publication) && hasActiveRuntimePublication(publication));
+
+    const stateKeys = [
+        identity,
+        displayName,
+        stableUserId,
+        stableName,
+        wsIdentity,
+        connectionId,
+    ].filter(Boolean);
+
+    // 音量控制必须使用真实 LiveKit participant.identity，因为 remoteAudioFeature 的 GainNode
+    // 是在 TrackSubscribed 时按 participant.identity 注册的。
+    const volumeIdentity = identity || displayName || stableUserId || stableName || 'unknown';
+
+    return {
+        keys: stateKeys,
+        identity: identity || stableUserId || displayName,
+        userId: stableUserId || identity || displayName,
+        displayName: displayName || stableName || identity,
+        volumeIdentity,
+        isSelf,
+        micOpen,
+        hasAppAudio,
+        micVolumePercent: getParticipantVolumePercent(volumeIdentity, 'mic'),
+        appAudioVolumePercent: getParticipantVolumePercent(volumeIdentity, 'appaudio'),
+        updatedAt: Date.now(),
+    };
+}
+
+function syncVoiceMemberAudioStatesFromRoom(reason = 'unknown') {
+    if (!room) {
+        clearVoiceMemberAudioStates();
+        return;
+    }
+
+    const states = [];
+    if (room.localParticipant) {
+        states.push(buildVoiceMemberAudioState(room.localParticipant, { isSelf: true }));
+    }
+
+    try {
+        Array.from(room.remoteParticipants?.values?.() || []).forEach((participant) => {
+            states.push(buildVoiceMemberAudioState(participant, { isSelf: false }));
+        });
+    } catch (error) {
+        logError(`runtime/syncVoiceMemberAudioStatesFromRoom 读取远端成员失败 reason=${reason}`, error, 'warn');
+    }
+
+    syncVoiceMemberAudioStates(states);
+}
+
 // 创建业务模块，并通过 context 注入它们需要的状态读写函数。
 const appAudioFeature = createAppAudioFeature({
     invoke,
     sanitizeText,
     getRoom: () => room,
     getIsAppAudioSharing: () => isAppAudioSharing,
-    setIsAppAudioSharing: (value) => { isAppAudioSharing = value; requestStoreSync(); },
+    setIsAppAudioSharing: (value) => { isAppAudioSharing = value; syncVoiceMemberAudioStatesFromRoom('app_audio_sharing_changed'); requestStoreSync(); },
     getLocalAppAudioPublication: () => localAppAudioPublication,
-    setLocalAppAudioPublication: (value) => { localAppAudioPublication = value; },
+    setLocalAppAudioPublication: (value) => { localAppAudioPublication = value; syncVoiceMemberAudioStatesFromRoom('app_audio_publication_changed'); },
     initLocalPcmPipeline: (...args) => audioPipelinesFeature.initLocalPcmPipeline(...args),
     teardownLocalPcmPipeline: () => audioPipelinesFeature.teardownLocalPcmPipeline(),
 });
@@ -348,7 +517,7 @@ const livekitEventsFeature = createLivekitEventsFeature({
     ensureParticipantVolumeState,
     addRemoteGainNode: (...args) => remoteAudioFeature.addRemoteGainNode(...args),
     removeRemoteAudioRouteByTrackSid: (...args) => remoteAudioFeature.removeRemoteAudioRouteByTrackSid(...args),
-    updateParticipantList: (...args) => participantsFeature.updateParticipantList(...args),
+    updateParticipantList: (...args) => updateParticipantList(...args),
     updateActiveSpeakerUI: (...args) => participantsFeature.updateActiveSpeakerUI(...args),
     markParticipantAsActiveSpeaker: (...args) => participantsFeature.markParticipantAsActiveSpeaker(...args),
     scheduleParticipantActiveSpeakerOff: (...args) => participantsFeature.scheduleParticipantActiveSpeakerOff(...args),
@@ -394,14 +563,14 @@ roomConnectionFeature = createRoomConnectionFeature({
     autoJoinFirstChannelAfterLobby: AUTO_JOIN_FIRST_CHANNEL_AFTER_LOBBY,
     sanitizeText,
     getRoom: () => room,
-    setRoom: (value) => { room = value; requestStoreSync(); },
+    setRoom: (value) => { room = value; if (!value) clearVoiceMemberAudioStates(); else syncVoiceMemberAudioStatesFromRoom('set_room'); requestStoreSync(); },
     ensureAudioContext,
     audioPipelines: audioPipelinesFeature,
     rustMic: rustMicFeature,
     appAudio: {
         getIsAppAudioSharing: () => isAppAudioSharing,
-        setIsAppAudioSharing: (value) => { isAppAudioSharing = value; requestStoreSync(); },
-        setLocalAppAudioPublication: (value) => { localAppAudioPublication = value; },
+        setIsAppAudioSharing: (value) => { isAppAudioSharing = value; syncVoiceMemberAudioStatesFromRoom('app_audio_sharing_changed'); requestStoreSync(); },
+        setLocalAppAudioPublication: (value) => { localAppAudioPublication = value; syncVoiceMemberAudioStatesFromRoom('app_audio_publication_changed'); },
         stopAppAudioShare: (...args) => appAudioFeature.stopAppAudioShare(...args),
         updateAppAudioButtons: (...args) => appAudioFeature.updateAppAudioButtons(...args),
         closeAppAudioModal: (...args) => appAudioFeature.closeAppAudioModal(...args),
@@ -417,6 +586,7 @@ roomConnectionFeature = createRoomConnectionFeature({
         clearActiveSpeakers: () => {
             participantsFeature.clearActiveSpeakers();
             clearSpeakingIdentities();
+            clearVoiceMemberAudioStates();
         },
     },
     remoteAudio: remoteAudioFeature,
@@ -478,11 +648,16 @@ function requestStoreSync() {
 }
 
 /** 包装异步动作：动作完成后统一同步 store，保证按钮状态和业务状态一致。 */
+function syncAfterRuntimeAction(reason = 'after_action') {
+    syncAppStore();
+    syncVoiceMemberAudioStatesFromRoom(reason);
+}
+
 function afterAction(result) {
     if (result && typeof result.finally === 'function') {
-        return result.finally(syncAppStore);
+        return result.finally(() => syncAfterRuntimeAction('after_action'));
     }
-    syncAppStore();
+    syncAfterRuntimeAction('after_action');
     return result;
 }
 
@@ -590,7 +765,24 @@ function renderChatMessage(msgDataOrSender, text, isSelf) { return chatFeature.r
 function addRemoteGainNode(identity, source, track, audioEl) { return remoteAudioFeature.addRemoteGainNode(identity, source, track, audioEl); }
 function clearRemoteGainNodes() { return remoteAudioFeature.clearRemoteGainNodes(); }
 function removeRemoteAudioRouteByTrackSid(trackSid) { return remoteAudioFeature.removeRemoteAudioRouteByTrackSid(trackSid); }
-function setParticipantVolume(identity, source, volumeValue) { return remoteAudioFeature.setParticipantVolume(identity, source, volumeValue); }
+function setParticipantVolume(identity, source, volumeValue) {
+    const cleanIdentity = String(identity || '').trim();
+    const cleanSource = String(source || 'mic').trim() || 'mic';
+    const result = remoteAudioFeature.setParticipantVolume(cleanIdentity, cleanSource, volumeValue);
+
+    if (cleanIdentity) {
+        const patch = { volumeIdentity: cleanIdentity };
+        if (cleanSource === 'mic') {
+            patch.micVolumePercent = getParticipantVolumePercent(cleanIdentity, 'mic');
+        }
+        if (cleanSource === 'appaudio') {
+            patch.appAudioVolumePercent = getParticipantVolumePercent(cleanIdentity, 'appaudio');
+        }
+        patchVoiceMemberAudioState(cleanIdentity, patch);
+    }
+
+    return result;
+}
 
 /** 返回某个成员某类音源的界面百分比，范围 0~300。 */
 function getParticipantVolumePercent(identity, source = 'mic') {
@@ -599,7 +791,11 @@ function getParticipantVolumePercent(identity, source = 'mic') {
     return gainToPercent(gain);
 }
 
-function updateParticipantList() { return participantsFeature.updateParticipantList(); }
+function updateParticipantList() {
+    const result = participantsFeature.updateParticipantList();
+    syncVoiceMemberAudioStatesFromRoom('update_participant_list');
+    return result;
+}
 function updateActiveSpeakerUI() { return participantsFeature.updateActiveSpeakerUI(); }
 function toggleLocalScreenSubscription(identity) { return livekitEventsFeature.toggleLocalScreenSubscription(identity); }
 

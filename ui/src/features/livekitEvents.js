@@ -10,10 +10,51 @@ export function createLivekitEventsFeature(context) {
         return source === context.LivekitClient.Track.Source.ScreenShare || source === 'screen_share';
     }
 
-    /** 判断音频 track 是否为 Rust 9001 发布的 app-audio。 */
+    /** 判断音频 track 是否为 Rust 9001 发布的应用/进程音频。 */
     function isAppAudioPublication(track, publication) {
-        const trackName = publication?.trackName || publication?.name || track?.name || '';
-        return trackName === 'app-audio';
+        const normalize = (value) => String(value || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+        const text = [
+            publication?.trackName,
+            publication?.name,
+            publication?.track?.name,
+            publication?.track?.mediaStreamTrack?.label,
+            track?.name,
+            track?.mediaStreamTrack?.label,
+            publication?.source,
+        ].map(normalize).filter(Boolean).join('|');
+
+        return [
+            'app-audio',
+            'appaudio',
+            'application-audio',
+            'system-audio',
+            'process-audio',
+            'window-audio',
+        ].some((keyword) => text.includes(keyword));
+    }
+
+    function getAudioPublicationSource(track, publication) {
+        if (isAppAudioPublication(track, publication)) return 'appaudio';
+        if (track?.source === context.LivekitClient.Track.Source.ScreenShareAudio
+            || track?.source === 'screen_share_audio'
+            || publication?.source === context.LivekitClient.Track.Source.ScreenShareAudio
+            || publication?.source === 'screen_share_audio') {
+            return 'screen';
+        }
+        return 'mic';
+    }
+
+    function removeAudioElementsForPublication(publication, participant) {
+        const identity = participant?.identity || publication?.participant?.identity || '';
+        const source = getAudioPublicationSource(publication?.track, publication);
+        const trackSid = publication?.trackSid || publication?.sid || publication?.track?.sid || '';
+
+        document.querySelectorAll('[data-audio-identity]').forEach((el) => {
+            const sameIdentity = !identity || el?.dataset?.audioIdentity === identity;
+            const sameSource = !source || el?.dataset?.audioSource === source;
+            const sameTrack = !trackSid || el?.dataset?.audioTrackSid === trackSid;
+            if (sameIdentity && (sameTrack || sameSource)) el.remove();
+        });
     }
 
     function removeLocalScreenRestoreCard(identity) {
@@ -194,13 +235,16 @@ export function createLivekitEventsFeature(context) {
                 audioEl.volume = 0;
                 audioEl.dataset.audioIdentity = participant.identity;
 
-                const source = isAppAudioPublication(track, publication)
-                    ? 'appaudio'
-                    : ((track.source === context.LivekitClient.Track.Source.ScreenShareAudio || track.source === 'screen_share_audio') ? 'screen' : 'mic');
+                const source = getAudioPublicationSource(track, publication);
                 audioEl.dataset.audioSource = source;
+                audioEl.dataset.audioTrackSid = track.sid || publication?.trackSid || '';
 
                 context.ensureParticipantVolumeState(participant.identity);
                 context.addRemoteGainNode(participant.identity, source, track, audioEl);
+
+                // 音频共享 / 屏幕共享音频订阅成功后立即刷新成员列表，
+                // 让对应的音量滑块不需要等下一次成员事件才出现。
+                context.updateParticipantList();
 
                 document.getElementById('audio-container')?.appendChild(audioEl);
                 if (typeof audioEl.setSinkId === 'function') {
@@ -214,6 +258,10 @@ export function createLivekitEventsFeature(context) {
         room.on(context.LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
             track.detach().forEach(element => element.remove());
             context.removeRemoteAudioRouteByTrackSid(track.sid);
+
+            if (track.kind === 'audio') {
+                context.updateParticipantList();
+            }
 
             const wrapper = document.getElementById('video-wrapper-' + track.sid);
             if (wrapper) wrapper.remove();
@@ -257,9 +305,6 @@ export function createLivekitEventsFeature(context) {
             });
 
             if (hasImmediateChange) context.updateActiveSpeakerUI();
-
-            // 桥接：将 active speaker 集合同步到 presenceStore，供 Vue 组件响应头像高亮
-            context.onActiveSpeakersChanged?.(nextActiveIdentities);
         });
 
         room.on(context.LivekitClient.RoomEvent.TrackMuted, (pub) => { if (pub.kind === 'audio') context.updateParticipantList(); });
@@ -277,11 +322,20 @@ export function createLivekitEventsFeature(context) {
             if (isScreenShareSource(pub?.source)) {
                 context.hideLocalScreenPreview();
             }
+            if (pub?.kind === 'audio') {
+                context.updateParticipantList();
+                setTimeout(() => context.updateParticipantList(), 80);
+            }
         });
 
         room.on(context.LivekitClient.RoomEvent.TrackPublished, (pub) => { if (pub.kind === 'audio') context.updateParticipantList(); });
         room.on(context.LivekitClient.RoomEvent.TrackUnpublished, (pub, participant) => {
-            if (pub.kind === 'audio') context.updateParticipantList();
+            if (pub.kind === 'audio') {
+                removeAudioElementsForPublication(pub, participant);
+                context.removeRemoteAudioRouteByTrackSid(pub?.trackSid || pub?.track?.sid);
+                context.updateParticipantList();
+                setTimeout(() => context.updateParticipantList(), 80);
+            }
 
             if (isScreenShareSource(pub?.source)) {
                 const identity = participant?.identity || Object.keys(localScreenControls).find(key => {

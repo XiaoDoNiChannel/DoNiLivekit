@@ -16,6 +16,12 @@ export const presenceStore = reactive({
     participants: {},
     /** 当前正在说话的用户标识集合；{ [identity]: true } */
     speakingIdentities: {},
+    /**
+     * 语音频道成员的实时音频状态。
+     * 这里不保存 LiveKit Track / MediaStream，只保存给 ChannelList 渲染用的轻量状态。
+     * key 可能是 identity / userId / displayName 的任意一种，读取时会多 key 匹配。
+     */
+    voiceStates: {},
     lastMessageType: '',
     lastUpdatedAt: Date.now(),
 });
@@ -30,6 +36,7 @@ export function resetPresenceStore() {
     presenceStore.channels = [];
     presenceStore.participants = {};
     presenceStore.speakingIdentities = {};
+    presenceStore.voiceStates = {};
     presenceStore.lastMessageType = '';
     presenceStore.lastUpdatedAt = Date.now();
 }
@@ -402,3 +409,111 @@ export function syncSpeakingIdentities(activeIdentities) {
 export function clearSpeakingIdentities() {
     presenceStore.speakingIdentities = {};
 }
+
+function clampVolumePercent(value, fallback = 100) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.min(Math.round(n), 300));
+}
+
+function normalizeVoiceStateRecord(raw = {}) {
+    const micOpen = raw.micOpen === true;
+    const hasAppAudio = raw.hasAppAudio === true;
+    const micVolumePercent = clampVolumePercent(raw.micVolumePercent ?? raw.volumes?.mic ?? 100);
+    const appAudioVolumePercent = clampVolumePercent(raw.appAudioVolumePercent ?? raw.volumes?.appaudio ?? 100);
+
+    return {
+        identity: cleanText(raw.identity),
+        userId: cleanText(raw.userId),
+        displayName: cleanText(raw.displayName),
+        volumeIdentity: cleanText(raw.volumeIdentity || raw.identity || raw.userId || raw.displayName),
+        isSelf: raw.isSelf === true,
+        micOpen,
+        micIcon: micOpen ? '🎙️' : '🔇',
+        micLabel: micOpen ? '开麦' : '闭麦',
+        micTitle: micOpen ? '麦克风已开启' : '麦克风未开启或已闭麦',
+        hasAppAudio,
+        micVolumePercent,
+        appAudioVolumePercent,
+        updatedAt: Number(raw.updatedAt || Date.now()),
+    };
+}
+
+function getVoiceStateKeysFromMember(member = {}) {
+    return [member.identity, member.userId, member.connectionId, member.displayName]
+        .map(cleanText)
+        .filter(Boolean);
+}
+
+/**
+ * 将 runtime.js 从 LiveKit Room 里解析出的轻量音频状态同步到 Presence Store。
+ * 注意：这里不保存 Track，只保存开麦/闭麦、是否有 appaudio、音量百分比。
+ */
+export function syncVoiceMemberAudioStates(records = {}) {
+    const next = {};
+    const values = Array.isArray(records) ? records : Object.values(records || {});
+
+    values.forEach((record) => {
+        const normalized = normalizeVoiceStateRecord(record);
+        const keys = [
+            ...(Array.isArray(record?.keys) ? record.keys : []),
+            normalized.identity,
+            normalized.userId,
+            normalized.displayName,
+        ].map(cleanText).filter(Boolean);
+
+        keys.forEach((key) => {
+            next[key] = normalized;
+        });
+    });
+
+    presenceStore.voiceStates = next;
+    presenceStore.lastUpdatedAt = Date.now();
+}
+
+/** 局部更新某个成员音频状态，主要给音量滑块实时回写百分比用。 */
+export function patchVoiceMemberAudioState(memberOrIdentity, patch = {}) {
+    const keys = typeof memberOrIdentity === 'object'
+        ? getVoiceStateKeysFromMember(memberOrIdentity)
+        : [cleanText(memberOrIdentity)].filter(Boolean);
+
+    if (keys.length === 0) return;
+
+    const next = { ...(presenceStore.voiceStates || {}) };
+    const base = keys.map((key) => next[key]).find(Boolean) || { identity: keys[0] };
+    const merged = normalizeVoiceStateRecord({ ...base, ...patch, updatedAt: Date.now() });
+
+    keys.forEach((key) => {
+        next[key] = merged;
+    });
+
+    presenceStore.voiceStates = next;
+    presenceStore.lastUpdatedAt = Date.now();
+}
+
+/** ChannelList.vue 根据成员 identity/userId/displayName 读取对应的音频状态。 */
+export function getVoiceMemberAudioState(member = {}) {
+    const keys = getVoiceStateKeysFromMember(member);
+    for (const key of keys) {
+        const record = presenceStore.voiceStates?.[key];
+        if (record) return record;
+    }
+
+    return normalizeVoiceStateRecord({
+        identity: cleanText(member.identity || member.userId || member.displayName),
+        userId: cleanText(member.userId || member.identity || member.displayName),
+        displayName: cleanText(member.displayName || member.identity || member.userId),
+        micOpen: false,
+        volumeIdentity: cleanText(member.identity || member.userId || member.displayName),
+        hasAppAudio: false,
+        micVolumePercent: 100,
+        appAudioVolumePercent: 100,
+    });
+}
+
+/** 清空语音状态；用于离开房间/断开连接。 */
+export function clearVoiceMemberAudioStates() {
+    presenceStore.voiceStates = {};
+    presenceStore.lastUpdatedAt = Date.now();
+}
+

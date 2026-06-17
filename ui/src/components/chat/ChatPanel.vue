@@ -100,6 +100,7 @@ function onDocumentKeydown(e) {
 onMounted(() => {
   document.addEventListener('click', onDocumentClick, true);
   document.addEventListener('keydown', onDocumentKeydown);
+  window.addEventListener('doni:insert-mention', handleExternalMentionInsert);
   window.addEventListener('focus', handleWindowFocus);
   document.addEventListener('visibilitychange', handleVisibilityChange);
   if (typeof window !== 'undefined') {
@@ -124,6 +125,7 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('click', onDocumentClick, true);
   document.removeEventListener('keydown', onDocumentKeydown);
+  window.removeEventListener('doni:insert-mention', handleExternalMentionInsert);
   window.removeEventListener('focus', handleWindowFocus);
   document.removeEventListener('visibilitychange', handleVisibilityChange);
   stopTitleFlash();
@@ -146,28 +148,54 @@ const groupedMessages = computed(() => {
 
 // ─── 自动滚动 ─────────────────────────────────────────────────────────────────
 const isAtBottom = ref(true);
+const unreadNewMessages = ref(0);
+let unreadChannelId = '';
 
 function checkScrollPos() {
   const el = messagesEl.value;
   if (!el) return;
   isAtBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  if (isAtBottom.value) {
+    unreadNewMessages.value = 0;
+    markVisibleChannelRead();
+  }
 }
 
 function scrollToBottom(force = false) {
   const el = messagesEl.value;
   if (!el) return;
   if (force || isAtBottom.value) {
+    unreadNewMessages.value = 0;
     nextTick(() => {
       el.scrollTop = el.scrollHeight;
+      isAtBottom.value = true;
+      markVisibleChannelRead();
     });
   }
 }
 
-watch(() => messages.value.length, () => {
+function jumpToLatestMessage() {
+  unreadNewMessages.value = 0;
+  scrollToBottom(true);
+}
+
+watch(() => messages.value.length, (newLen, oldLen) => {
+  const current = chatStore.currentChannelId || appStore.connection.currentChannel || '';
+  if (current !== unreadChannelId) {
+    unreadChannelId = current;
+    unreadNewMessages.value = 0;
+  } else if (newLen > oldLen && !isAtBottom.value) {
+    const appended = messages.value.slice(oldLen);
+    const incomingCount = appended.filter((msg) => !msg.isSelf).length;
+    if (incomingCount > 0) unreadNewMessages.value += incomingCount;
+  }
+
   scrollToBottom();
-  nextTick(markVisibleChannelRead);
+  if (isAtBottom.value) nextTick(markVisibleChannelRead);
 });
 watch(() => chatStore.currentChannelId, () => {
+  unreadChannelId = chatStore.currentChannelId || '';
+  unreadNewMessages.value = 0;
   nextTick(() => {
     scrollToBottom(true);
     markVisibleChannelRead();
@@ -537,6 +565,54 @@ function insertMentionCandidate(candidate) {
     el.setSelectionRange(caret, caret);
   });
 }
+
+function insertMentionText(candidateLike, source = 'external') {
+  if (!candidateLike) return;
+
+  const normalized = [];
+  addMentionCandidate(normalized, candidateLike, { source });
+  const candidate = normalized[0] || candidateLike;
+  const displayName = cleanMentionDisplayName(candidate.displayName || candidate.name || candidate.senderName, candidate.id || candidate.userId || candidate.identity);
+  const mentionId = makeMentionId(candidate);
+  if (!displayName || !mentionId) return;
+
+  const el = textareaEl.value;
+  const start = el?.selectionStart ?? inputText.value.length;
+  const end = el?.selectionEnd ?? inputText.value.length;
+  const before = inputText.value.slice(0, start);
+  const after = inputText.value.slice(end);
+  const lead = before.length > 0 && !/[\s([{（]$/.test(before) ? ' ' : '';
+  const trail = after.length > 0 && !/^\s/.test(after) ? ' ' : ' ';
+  const mentionText = `${lead}@${displayName}${trail}`;
+
+  inputText.value = before + mentionText + after;
+  selectedMentionMap.set(displayName, mentionId);
+  closeMentionPicker();
+
+  const caret = before.length + mentionText.length;
+  nextTick(() => {
+    resizeComposer(el || textareaEl.value);
+    textareaEl.value?.focus?.();
+    textareaEl.value?.setSelectionRange?.(caret, caret);
+  });
+}
+
+function insertMentionFromMessage(msg) {
+  if (!msg) return;
+  insertMentionText({
+    userId: msg.senderUserId || msg.senderId,
+    identity: msg.senderIdentity || msg.senderId,
+    displayName: msg.senderName,
+    avatarColor: msg.senderColor,
+    avatarPreset: msg.senderPreset,
+    avatarUrl: msg.senderAvatarUrl,
+  }, 'message');
+}
+
+function handleExternalMentionInsert(event) {
+  insertMentionText(event?.detail || {}, 'external');
+}
+
 
 function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1055,11 +1131,14 @@ function formatFullTime(ts) {
         <div class="w-12 shrink-0 flex justify-center pt-0.5">
           <BaseAvatar
             v-if="!msg.isGrouped"
+            class="cursor-pointer"
             :name="msg.senderName"
             :color="msg.senderColor"
             :preset="msg.senderPreset"
             :avatar-url="msg.senderAvatarUrl"
             size="md"
+            title="右键 @ 这个成员"
+            @contextmenu.stop.prevent="insertMentionFromMessage(msg)"
           />
           <!-- 折叠时显示时间（hover 才显示） -->
           <span
@@ -1074,9 +1153,11 @@ function formatFullTime(ts) {
           <!-- 发送者昵称 + 时间（非折叠时显示） -->
           <div v-if="!msg.isGrouped" class="flex items-baseline gap-2 mb-1">
             <span
-              class="font-semibold text-sm leading-none"
+              class="font-semibold text-sm leading-none cursor-pointer"
               :class="msg.isSelf ? 'text-[#5865f2]' : 'text-[#f2f3f5]'"
               :style="!msg.isSelf && msg.senderColor ? { color: msg.senderColor } : {}"
+              title="右键 @ 这个成员"
+              @contextmenu.stop.prevent="insertMentionFromMessage(msg)"
             >{{ msg.senderName }}</span>
             <span v-if="msg.isSelf" class="text-[10px] text-[#5865f2] bg-[#5865f2]/10 px-1 rounded leading-none py-0.5">我</span>
             <span class="text-[11px] text-[#4e5058]" :title="formatFullTime(msg.timestamp)">{{ formatTime(msg.timestamp) }}</span>
@@ -1147,12 +1228,12 @@ function formatFullTime(ts) {
       <button
         v-if="!isAtBottom && messages.length > 0"
         class="sticky bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-[#5865f2] text-white text-xs font-medium px-3 py-1.5 rounded-full shadow-lg hover:bg-[#4752c4] transition-colors z-10"
-        @click="scrollToBottom(true)"
+        @click="jumpToLatestMessage"
       >
         <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
           <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
         </svg>
-        跳到最新
+        {{ unreadNewMessages > 0 ? `有 ${unreadNewMessages} 条未读消息` : '跳到最新' }}
       </button>
     </div>
 
