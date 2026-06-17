@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue';
+import BaseAvatar from '../common/BaseAvatar.vue';
 import { appStore } from '../../stores/appStore.js';
 import {
   presenceStore,
@@ -212,11 +213,23 @@ function setMemberVolume(member, source, event) {
         >
           <div class="voice-member-mainline">
             <span
-              class="voice-member-avatar"
+              class="voice-member-avatar-shell"
               :class="{ 'mic-open': voiceState(member).micOpen, 'mic-closed': !voiceState(member).micOpen }"
-              :style="member.avatarColor ? { background: member.avatarColor } : null"
               :title="voiceState(member).micTitle"
-            >{{ member.displayName.slice(0, 1).toUpperCase() }}</span>
+            >
+              <BaseAvatar
+                :name="member.displayName"
+                :color="member.avatarColor"
+                :preset="member.avatarPreset"
+                :avatar-url="member.avatarUrl"
+                :is-speaking="isSpeaking(member)"
+                size="sm"
+              />
+              <span
+                class="voice-member-mic-dot"
+                :class="{ 'mic-open': voiceState(member).micOpen, 'mic-closed': !voiceState(member).micOpen }"
+              ></span>
+            </span>
 
             <span class="voice-member-identity">
               <span class="voice-member-name-line">
@@ -311,12 +324,32 @@ function setMemberVolume(member, source, event) {
   box-shadow: inset 0 0 0 1px rgba(35, 165, 89, 0.5), 0 0 14px rgba(35, 165, 89, 0.18);
 }
 
-.voice-member-avatar {
+.voice-member-avatar-shell {
   position: relative;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  transition: box-shadow 0.16s ease, transform 0.16s ease;
 }
 
-.voice-member-avatar::after {
-  content: '';
+.voice-member-avatar-shell :deep(.base-avatar),
+.voice-member-avatar-shell :deep(.base-avatar-img) {
+  width: 32px;
+  height: 32px;
+}
+
+.voice-member-row.active-speaker .voice-member-avatar-shell {
+  box-shadow:
+    0 0 0 2px rgba(35, 165, 89, 0.95),
+    0 0 12px rgba(35, 165, 89, 0.7),
+    0 0 22px rgba(35, 165, 89, 0.35);
+}
+
+.voice-member-mic-dot {
   position: absolute;
   right: -2px;
   bottom: -2px;
@@ -325,13 +358,14 @@ function setMemberVolume(member, source, event) {
   border-radius: 999px;
   border: 2px solid #2b2d31;
   background: #949ba4;
+  pointer-events: none;
 }
 
-.voice-member-avatar.mic-open::after {
+.voice-member-mic-dot.mic-open {
   background: #23a559;
 }
 
-.voice-member-avatar.mic-closed::after {
+.voice-member-mic-dot.mic-closed {
   background: #f23f42;
 }
 

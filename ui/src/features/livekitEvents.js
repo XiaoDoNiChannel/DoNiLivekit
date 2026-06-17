@@ -305,6 +305,10 @@ export function createLivekitEventsFeature(context) {
             });
 
             if (hasImmediateChange) context.updateActiveSpeakerUI();
+
+            // 通知 Vue 侧语音频道成员列表同步说话状态。
+            // 旧 DOM 高亮由 updateActiveSpeakerUI 处理；ChannelList/BaseAvatar 依赖这个回调。
+            context.onActiveSpeakersChanged?.(context.getActiveSpeakerIdentities());
         });
 
         room.on(context.LivekitClient.RoomEvent.TrackMuted, (pub) => { if (pub.kind === 'audio') context.updateParticipantList(); });

@@ -518,9 +518,22 @@ const livekitEventsFeature = createLivekitEventsFeature({
     addRemoteGainNode: (...args) => remoteAudioFeature.addRemoteGainNode(...args),
     removeRemoteAudioRouteByTrackSid: (...args) => remoteAudioFeature.removeRemoteAudioRouteByTrackSid(...args),
     updateParticipantList: (...args) => updateParticipantList(...args),
-    updateActiveSpeakerUI: (...args) => participantsFeature.updateActiveSpeakerUI(...args),
+    updateActiveSpeakerUI: (...args) => updateActiveSpeakerUI(...args),
     markParticipantAsActiveSpeaker: (...args) => participantsFeature.markParticipantAsActiveSpeaker(...args),
-    scheduleParticipantActiveSpeakerOff: (...args) => participantsFeature.scheduleParticipantActiveSpeakerOff(...args),
+    scheduleParticipantActiveSpeakerOff: (identity) => {
+        const result = participantsFeature.scheduleParticipantActiveSpeakerOff(identity);
+        // 频道成员头像高亮由 presenceStore.speakingIdentities 驱动。
+        // participantsFeature 内部有延迟关闭高亮的防抖，这里在防抖结束后再同步一次，
+        // 避免“头像绿光打开后不关闭”或 Vue 区域完全收不到关闭状态。
+        setTimeout(() => {
+            try {
+                syncSpeakingIdentities(participantsFeature.getActiveSpeakerIdentities());
+            } catch (error) {
+                logError('runtime/scheduleParticipantActiveSpeakerOff 同步说话状态失败', error, 'warn');
+            }
+        }, ACTIVE_SPEAKER_DEBOUNCE_MS + 30);
+        return result;
+    },
     getActiveSpeakerIdentities: () => participantsFeature.getActiveSpeakerIdentities(),
     activeSpeakerLevelThreshold: ACTIVE_SPEAKER_LEVEL_THRESHOLD,
     showLocalScreenPreview: (...args) => screenShareFeature.showLocalScreenPreview(...args),
@@ -796,7 +809,17 @@ function updateParticipantList() {
     syncVoiceMemberAudioStatesFromRoom('update_participant_list');
     return result;
 }
-function updateActiveSpeakerUI() { return participantsFeature.updateActiveSpeakerUI(); }
+function updateActiveSpeakerUI() {
+    const result = participantsFeature.updateActiveSpeakerUI();
+    // 旧 DOM 成员列表由 participantsFeature 自己更新；
+    // Vue 语音频道成员列表需要同步到 presenceStore 才能触发 BaseAvatar 说话绿光。
+    try {
+        syncSpeakingIdentities(participantsFeature.getActiveSpeakerIdentities());
+    } catch (error) {
+        logError('runtime/updateActiveSpeakerUI 同步说话状态失败', error, 'warn');
+    }
+    return result;
+}
 function toggleLocalScreenSubscription(identity) { return livekitEventsFeature.toggleLocalScreenSubscription(identity); }
 
 function getMicCaptureOptions() { return rustMicFeature.getMicCaptureOptions(); }
