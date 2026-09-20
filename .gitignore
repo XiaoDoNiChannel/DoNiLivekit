@@ -165,6 +165,9 @@ desktop.ini
 # .editorconfig
 # .gitignore
 
+# Local editor workspace files
+*.code-workspace
+
 
 # 后端本地数据库和测试文件
 rooms.db

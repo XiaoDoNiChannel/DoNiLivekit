@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import BaseAvatar from '../common/BaseAvatar.vue';
 import { appStore } from '../../stores/appStore.js';
-import { presenceStore } from '../../stores/presenceStore.js';
+import { presenceStore, getAuthoritativeChannelMembers } from '../../stores/presenceStore.js';
 import { getSelfDisplayName, getStableAvatarColor, profileStore } from '../../stores/profileStore.js';
 import { getActiveTheme } from '../../stores/themeStore.js';
 import { getLiveKitRoom } from '../../app/runtime.js';
@@ -18,7 +18,7 @@ const currentChannel = computed(() => {
 const currentChannelName = computed(() => currentChannel.value?.name || currentChannel.value?.id || fallbackChannelName.value);
 const isConnected = computed(() => !!appStore.connection.isConnected);
 const isInLobby = computed(() => !!appStore.connection.isInLobby);
-const memberCount = computed(() => Array.isArray(currentChannel.value?.members) ? currentChannel.value.members.length : 0);
+const memberCount = computed(() => getAuthoritativeChannelMembers(appStore.connection.currentChannel).length);
 const selfName = computed(() => getSelfDisplayName(appStore.connection.username || presenceStore.displayName || ''));
 const activeThemeName = computed(() => getActiveTheme().name);
 const hasMediaSurface = ref(false);
@@ -38,7 +38,7 @@ const connectionStats = reactive({
 });
 
 const channelMembers = computed(() => {
-  const rows = Array.isArray(currentChannel.value?.members) ? currentChannel.value.members : [];
+  const rows = getAuthoritativeChannelMembers(appStore.connection.currentChannel);
   return [...rows].sort((a, b) => {
     const aSelf = isSelfMember(a) ? 0 : 1;
     const bSelf = isSelfMember(b) ? 0 : 1;

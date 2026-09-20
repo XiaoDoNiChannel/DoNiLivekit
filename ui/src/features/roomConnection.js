@@ -212,7 +212,6 @@ export function createRoomConnectionFeature(context) {
                 avatarPreset: profileStore.avatarPreset,
                 avatarUrl: profileStore.avatarUrl,
             });
-            context.presence.requestSnapshot();
         } catch (err) {
             logError('roomConnection/joinRoom 连接 Presence WebSocket 失败', err, 'warn');
         }

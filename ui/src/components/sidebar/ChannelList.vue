@@ -5,6 +5,7 @@ import { appStore } from '../../stores/appStore.js';
 import {
   presenceStore,
   getVoiceMemberAudioState,
+  getAuthoritativeChannelMembers,
 } from '../../stores/presenceStore.js';
 import { chatStore, getChannelNotification, markChannelRead } from '../../stores/chatStore.js';
 
@@ -81,8 +82,10 @@ const channelRows = computed(() => {
     if (!channel || seen.has(channel.id)) return;
     seen.add(channel.id);
     const notice = getChannelNotification(channel.id);
+    const members = getAuthoritativeChannelMembers(channel.id);
     rows.push({
       ...channel,
+      members,
       unread: Number(notice.unread || 0),
       mentions: Number(notice.mentions || 0),
     });

@@ -386,6 +386,8 @@ export function createLivekitEventsFeature(context) {
                 notifyLiveKitStable(room, 'connection_state_connected', { state });
             } else if (normalized === 'reconnecting') {
                 notifyLiveKitUnstable(room, 'connection_state_reconnecting', { state });
+            } else if (normalized === 'disconnected') {
+                notifyLiveKitUnstable(room, 'connection_state_disconnected', { state });
             }
         });
     }

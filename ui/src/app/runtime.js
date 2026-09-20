@@ -9,7 +9,16 @@ import { sanitizeText } from '../shared/text.js';
 import { logError } from '../shared/errors.js';
 import { appStore, markAppBooted, syncFromRuntimeSnapshot, setLastError } from '../stores/appStore.js';
 import { profileStore, getConnectionId, syncProfileToServer } from '../stores/profileStore.js';
-import { syncSpeakingIdentities, clearSpeakingIdentities, syncVoiceMemberAudioStates, clearVoiceMemberAudioStates, patchVoiceMemberAudioState } from '../stores/presenceStore.js';
+import {
+    syncSpeakingIdentities,
+    clearSpeakingIdentities,
+    syncVoiceMemberAudioStates,
+    clearVoiceMemberAudioStates,
+    patchVoiceMemberAudioState,
+    syncCurrentVoiceMembers,
+    clearCurrentVoiceMembers,
+    getAuthoritativeChannelMembers,
+} from '../stores/presenceStore.js';
 import { watch } from 'vue';
 import { chatStore, switchChatChannel, loadServerHistory, addChatMessage, markMessageSent, markMessageFailed, applyServerChatMessage, applyServerReactionUpdate, updateChatAvatars } from '../stores/chatStore.js';
 import { setApiBase } from '../shared/apiClient.js';
@@ -84,9 +93,7 @@ const presenceClient = createPresenceClient({
         requestStoreSync();
     },
     onConnectionChange: (state = {}) => {
-        if (state.connected) {
-            schedulePresenceChannelSync('presence_connected', { delayMs: 50, snapshotDelayMs: 250 });
-        }
+        // presenceClient 在 onopen 内原子地恢复当前频道并请求 snapshot；这里不重复发送 join。
         requestStoreSync();
     },
 });
@@ -418,6 +425,7 @@ function buildVoiceMemberAudioState(participant, { isSelf = false } = {}) {
     const hasAppAudio = isSelf
         ? !!(isAppAudioSharing && hasLocalAppAudioTrack)
         : publications.some((publication) => isRuntimeAppAudioPublication(publication) && hasActiveRuntimePublication(publication));
+    const hasScreenAudio = publications.some((publication) => isRuntimeScreenAudioPublication(publication) && hasActiveRuntimePublication(publication));
 
     const stateKeys = [
         identity,
@@ -441,6 +449,7 @@ function buildVoiceMemberAudioState(participant, { isSelf = false } = {}) {
         isSelf,
         micOpen,
         hasAppAudio,
+        hasScreenAudio,
         micVolumePercent: getParticipantVolumePercent(volumeIdentity, 'mic'),
         appAudioVolumePercent: getParticipantVolumePercent(volumeIdentity, 'appaudio'),
         updatedAt: Date.now(),
@@ -450,6 +459,7 @@ function buildVoiceMemberAudioState(participant, { isSelf = false } = {}) {
 function syncVoiceMemberAudioStatesFromRoom(reason = 'unknown') {
     if (!room) {
         clearVoiceMemberAudioStates();
+        clearCurrentVoiceMembers();
         return;
     }
 
@@ -467,6 +477,11 @@ function syncVoiceMemberAudioStatesFromRoom(reason = 'unknown') {
     }
 
     syncVoiceMemberAudioStates(states);
+    syncCurrentVoiceMembers(
+        roomConnectionFeature?.getCurrentChannel?.() || chatStore.currentChannelId || '',
+        states,
+        true,
+    );
 }
 
 // 创建业务模块，并通过 context 注入它们需要的状态读写函数。
@@ -507,6 +522,9 @@ const participantsFeature = createParticipantsFeature({
     getRoom: () => room,
     ensureParticipantVolumeState,
     gainToPercent,
+    getAuthoritativeMembers: () => getAuthoritativeChannelMembers(
+        roomConnectionFeature?.getCurrentChannel?.() || chatStore.currentChannelId || '',
+    ),
     activeSpeakerDebounceMs: ACTIVE_SPEAKER_DEBOUNCE_MS,
 });
 
@@ -545,6 +563,9 @@ const livekitEventsFeature = createLivekitEventsFeature({
     },
     onLivekitConnectionUnstable: ({ reason } = {}) => {
         console.debug?.('[LiveKit] connection unstable', reason || 'unknown');
+        if (String(reason || '').includes('disconnected')) {
+            clearCurrentVoiceMembers();
+        }
         requestStoreSync();
     },
     onLivekitParticipantsChanged: ({ reason } = {}) => {
@@ -576,7 +597,7 @@ roomConnectionFeature = createRoomConnectionFeature({
     autoJoinFirstChannelAfterLobby: AUTO_JOIN_FIRST_CHANNEL_AFTER_LOBBY,
     sanitizeText,
     getRoom: () => room,
-    setRoom: (value) => { room = value; if (!value) clearVoiceMemberAudioStates(); else syncVoiceMemberAudioStatesFromRoom('set_room'); requestStoreSync(); },
+    setRoom: (value) => { room = value; if (!value) { clearVoiceMemberAudioStates(); clearCurrentVoiceMembers(); } else syncVoiceMemberAudioStatesFromRoom('set_room'); requestStoreSync(); },
     ensureAudioContext,
     audioPipelines: audioPipelinesFeature,
     rustMic: rustMicFeature,
@@ -600,6 +621,7 @@ roomConnectionFeature = createRoomConnectionFeature({
             participantsFeature.clearActiveSpeakers();
             clearSpeakingIdentities();
             clearVoiceMemberAudioStates();
+            clearCurrentVoiceMembers();
         },
     },
     remoteAudio: remoteAudioFeature,
@@ -805,9 +827,8 @@ function getParticipantVolumePercent(identity, source = 'mic') {
 }
 
 function updateParticipantList() {
-    const result = participantsFeature.updateParticipantList();
     syncVoiceMemberAudioStatesFromRoom('update_participant_list');
-    return result;
+    return participantsFeature.updateParticipantList();
 }
 function updateActiveSpeakerUI() {
     const result = participantsFeature.updateActiveSpeakerUI();
@@ -1080,6 +1101,10 @@ function initLegacyDomBlock2() {
             const threshold = parseFloat(liveSlider?.value || '0');
             liveFillBar.style.background = volumePercent < threshold ? '#4f545c' : '#23a559';
         }
+    });
+
+    listen('mic_audio_metrics', (event) => {
+        console.debug?.('[Rust Mic Metrics]', event?.payload || {});
     });
 
     rustMicFeature.registerRustMicErrorListener();

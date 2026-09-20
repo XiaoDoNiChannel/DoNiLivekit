@@ -14,6 +14,10 @@ export const presenceStore = reactive({
     displayName: '',
     channels: [],
     participants: {},
+    /** 当前已加入频道的权威成员集合，唯一来源是 LiveKit Room。 */
+    currentVoiceChannelId: '',
+    livekitConnected: false,
+    voiceMembers: [],
     /** 当前正在说话的用户标识集合；{ [identity]: true } */
     speakingIdentities: {},
     /**
@@ -35,6 +39,9 @@ export function resetPresenceStore() {
     presenceStore.displayName = '';
     presenceStore.channels = [];
     presenceStore.participants = {};
+    presenceStore.currentVoiceChannelId = '';
+    presenceStore.livekitConnected = false;
+    presenceStore.voiceMembers = [];
     presenceStore.speakingIdentities = {};
     presenceStore.voiceStates = {};
     presenceStore.lastMessageType = '';
@@ -261,6 +268,14 @@ export function applyPresenceSnapshot(message) {
         ? message.participants
         : {};
 
+    if (presenceStore.livekitConnected && presenceStore.currentVoiceChannelId) {
+        syncCurrentVoiceMembers(
+            presenceStore.currentVoiceChannelId,
+            presenceStore.voiceMembers,
+            true,
+        );
+    }
+
     presenceStore.lastMessageType = message.type;
     presenceStore.lastUpdatedAt = Date.now();
 }
@@ -365,6 +380,12 @@ function applyProfileUpdate(message) {
             }
         }
     }
+
+    for (const member of presenceStore.voiceMembers || []) {
+        if (memberMatches(member, { identity, userId, connectionId, displayName })) {
+            applyToMember(member);
+        }
+    }
 }
 
 /** 统一处理 Presence 消息；ChannelList.vue 会自动响应 presenceStore 的变化。 */
@@ -387,6 +408,81 @@ export function applyPresenceMessage(message) {
 
     presenceStore.lastMessageType = message.type;
     presenceStore.lastUpdatedAt = Date.now();
+}
+
+function findPresenceProfile(identity, userId = '') {
+    const cleanIdentity = cleanText(identity);
+    const cleanUserId = cleanText(userId);
+    if (cleanIdentity && presenceStore.participants[cleanIdentity]) {
+        return presenceStore.participants[cleanIdentity];
+    }
+    return Object.values(presenceStore.participants || {}).find((participant) => {
+        if (cleanIdentity && cleanText(participant?.identity) === cleanIdentity) return true;
+        return cleanUserId && cleanText(participant?.userId) === cleanUserId;
+    }) || null;
+}
+
+/**
+ * 用 LiveKit localParticipant + remoteParticipants 全量替换当前频道成员。
+ * Presence 只补充昵称、头像、userId/connectionId，不参与当前频道人数计算。
+ */
+export function syncCurrentVoiceMembers(channelId, records = [], connected = true) {
+    const cleanChannelId = cleanText(channelId);
+    if (!connected || !cleanChannelId) {
+        presenceStore.currentVoiceChannelId = '';
+        presenceStore.livekitConnected = false;
+        presenceStore.voiceMembers = [];
+        presenceStore.lastUpdatedAt = Date.now();
+        return;
+    }
+
+    const byIdentity = new Map();
+    for (const raw of records || []) {
+        const identity = cleanText(raw?.identity);
+        if (!identity) continue;
+        const profile = findPresenceProfile(identity, raw?.userId);
+        const normalized = normalizeMember({
+            ...profile,
+            ...raw,
+            identity,
+            userId: cleanText(profile?.userId || raw?.userId || identity),
+            connectionId: cleanText(profile?.connectionId || raw?.connectionId),
+            displayName: cleanText(profile?.displayName || raw?.displayName || identity),
+            avatarColor: profile?.avatarColor ?? raw?.avatarColor,
+            avatarPreset: profile?.avatarPreset ?? raw?.avatarPreset,
+            avatarUrl: profile?.avatarUrl ?? raw?.avatarUrl,
+            statusText: profile?.statusText || raw?.statusText || '在线',
+        });
+        if (!normalized) continue;
+        byIdentity.set(identity, { ...raw, ...normalized });
+    }
+
+    presenceStore.currentVoiceChannelId = cleanChannelId;
+    presenceStore.livekitConnected = true;
+    presenceStore.voiceMembers = [...byIdentity.values()];
+    presenceStore.lastUpdatedAt = Date.now();
+}
+
+export function clearCurrentVoiceMembers() {
+    syncCurrentVoiceMembers('', [], false);
+}
+
+/** 当前频道读 LiveKit 派生集合，其他频道继续读 Presence。 */
+export function getAuthoritativeChannelMembers(channelId) {
+    const cleanChannelId = cleanText(channelId);
+    const channel = presenceStore.channels.find((row) => row.id === cleanChannelId || row.name === cleanChannelId);
+    const presenceMembers = Array.isArray(channel?.members) ? channel.members : [];
+    if (!presenceStore.livekitConnected) return presenceMembers;
+    if (cleanChannelId && cleanChannelId === presenceStore.currentVoiceChannelId) {
+        return presenceStore.voiceMembers;
+    }
+
+    // 切频道时 Presence moved 可能稍晚到达；LiveKit 已确认在当前房间的 identity
+    // 必须从其他频道派生列表中排除，避免同一人短暂同时出现在旧/新频道。
+    const livekitIdentities = new Set(
+        (presenceStore.voiceMembers || []).map((member) => cleanText(member?.identity)).filter(Boolean),
+    );
+    return presenceMembers.filter((member) => !livekitIdentities.has(cleanText(member?.identity)));
 }
 
 /**
@@ -516,4 +612,3 @@ export function clearVoiceMemberAudioStates() {
     presenceStore.voiceStates = {};
     presenceStore.lastUpdatedAt = Date.now();
 }
-

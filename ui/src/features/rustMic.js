@@ -8,6 +8,13 @@ export function createRustMicFeature(context) {
     let localRustMicPublication = null;
     let hasRegisteredRustMicErrorListener = false;
     let lastRustMicErrorAt = 0;
+    let micLifecycleChain = Promise.resolve();
+
+    function enqueueMicLifecycle(action) {
+        const next = micLifecycleChain.then(action, action);
+        micLifecycleChain = next.catch(() => {});
+        return next;
+    }
 
     /** 浏览器麦克风 fallback 的约束配置，Rust 麦克风不使用这组参数。 */
     function getMicCaptureOptions() {
@@ -80,7 +87,7 @@ export function createRustMicFeature(context) {
     }
 
     /** 启动 Rust 采集、初始化 9002 管线，并 publish 为 LiveKit microphone track。 */
-    async function startRustMicShare() {
+    async function startRustMicShareNow() {
         const room = context.getRoom();
         if (!room || !room.localParticipant) {
             throw new Error('无法启动 Rust 麦克风：当前没有连接到 LiveKit 房间。');
@@ -150,7 +157,7 @@ export function createRustMicFeature(context) {
     }
 
     /** 停止 Rust 麦克风发布并释放 9002 管线。 */
-    async function stopRustMicShare() {
+    async function stopRustMicShareNow() {
         await context.invoke('toggle_rust_mic', { enable: false }).catch((error) => {
             logError('rustMic/stopRustMicShare 关闭 Rust 采集状态失败', error, 'warn');
         });
@@ -168,6 +175,14 @@ export function createRustMicFeature(context) {
             isRustMicOn = false;
             isMicOn = false;
         }
+    }
+
+    function startRustMicShare() {
+        return enqueueMicLifecycle(() => startRustMicShareNow());
+    }
+
+    function stopRustMicShare() {
+        return enqueueMicLifecycle(() => stopRustMicShareNow());
     }
 
     /** 旧按钮兼容入口：只切换 Rust 麦克风，不处理浏览器麦克风。 */

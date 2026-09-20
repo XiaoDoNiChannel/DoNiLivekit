@@ -63,6 +63,9 @@ Windows 麦克风设备
 → LiveKit publishTrack(source=Microphone)
 ```
 
+9002 的每个 10ms 帧还会先发送一条 `pcm_frame_meta` 文本消息，包含 `seq`、
+`capturedAtMicros` 和 `discontinuity`。PCM 二进制格式保持 Float32 不变。
+
 相关模块：
 
 ```text
@@ -93,7 +96,20 @@ set_mic_boost
 接收 Float32 PCM
 写入 ring buffer
 在 AudioWorklet process 中按帧输出
+轻微积压时在零交叉附近平滑追赶
+严重积压时在安静边界做有记录的恢复
 ```
+
+唯一 Worklet 实现位于 `ui/public/pcm-worker.js`，纯缓冲算法位于
+`ui/public/pcm-ring-buffer-core.js`；`ui/pcm-worker.js` 只是旧路径兼容入口。
+Worklet 每约 2 秒输出当前/最大缓冲帧、下溢、丢弃、跳过和 discontinuity 指标。
+
+Rust 9002 使用 generation 会话和 24 帧有界队列。队列过载时优先移除最旧静音帧，
+否则移除最旧帧并标记 discontinuity，不再静默丢弃最新采集帧。`mic_audio_metrics`
+事件包含采集/发送帧数、队列高水位、过载、丢弃和 discontinuity 计数。
+
+VAD 在 RNNoise 后增加约 120ms 前滚和约 320ms hangover，开关门使用逐样本平滑增益。
+设置 `DONICHANNEL_VAD_DEBUG=1` 可输出开门/关门状态转换日志。
 
 它不负责：
 

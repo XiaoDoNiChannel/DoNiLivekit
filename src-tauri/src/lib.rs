@@ -1,11 +1,15 @@
 use futures_util::SinkExt;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    Arc, Mutex,
+};
+use std::time::{SystemTime, UNIX_EPOCH};
 use sysinfo::System;
 use tauri::{Emitter, Manager};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Notify};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -24,18 +28,20 @@ use windows::{
             eCapture, eCommunications, eMultimedia, eRender, ActivateAudioInterfaceAsync,
             IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
             IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
-            IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
-            AUDCLNT_BUFFERFLAGS_SILENT,
-            AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_WRONG_ENDPOINT_TYPE, AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
-            AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-            AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator,
+            AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED,
+            AUDCLNT_E_WRONG_ENDPOINT_TYPE, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+            AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+            AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+            DEVICE_STATE_ACTIVE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX,
         },
         System::Com::{
-            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, STGM_READ,
-            StructuredStorage::{PropVariantClear, PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0},
-            BLOB, CLSCTX_ALL, COINIT_MULTITHREADED,
+            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+            StructuredStorage::{
+                PropVariantClear, PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
+            },
+            BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
         },
         System::Variant::{VT_BLOB, VT_LPWSTR},
     },
@@ -45,13 +51,176 @@ struct AppState {
     capture_tx: broadcast::Sender<Vec<u32>>,
     latest_capture_pids: Arc<Mutex<Vec<u32>>>,
     mic_vad_threshold: Arc<Mutex<f32>>,
-    is_mic_running: Arc<Mutex<bool>>,
+    mic_sessions: Arc<MicSessionManager>,
     mic_boost: Arc<Mutex<f32>>,
     selected_mic_device_id: Arc<Mutex<Option<String>>>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum MicLifecycle {
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+}
+
+struct ActiveMicSession {
+    generation: u64,
+    cancel: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+    completed: Arc<Notify>,
+}
+
+struct MicSessionInner {
+    generation: u64,
+    desired_enabled: bool,
+    lifecycle: MicLifecycle,
+    active: Option<ActiveMicSession>,
+}
+
+struct MicSessionLease {
+    generation: u64,
+    cancel: Arc<AtomicBool>,
+}
+
+struct MicSessionManager {
+    inner: Mutex<MicSessionInner>,
+}
+
+impl MicSessionManager {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(MicSessionInner {
+                generation: 0,
+                desired_enabled: false,
+                lifecycle: MicLifecycle::Stopped,
+                active: None,
+            }),
+        }
+    }
+
+    fn request_enabled(&self, enable: bool) -> Result<u64, String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "麦克风会话状态锁被污染".to_string())?;
+
+        if enable
+            && inner.desired_enabled
+            && matches!(
+                inner.lifecycle,
+                MicLifecycle::Starting | MicLifecycle::Running
+            )
+        {
+            return Ok(inner.generation);
+        }
+
+        inner.generation = inner.generation.saturating_add(1);
+        inner.desired_enabled = enable;
+        if let Some(active) = inner.active.as_ref() {
+            active.cancel.store(true, Ordering::Release);
+            inner.lifecycle = if enable {
+                MicLifecycle::Starting
+            } else {
+                MicLifecycle::Stopping
+            };
+        } else {
+            inner.lifecycle = if enable {
+                MicLifecycle::Starting
+            } else {
+                MicLifecycle::Stopped
+            };
+        }
+        Ok(inner.generation)
+    }
+
+    async fn begin_session(&self) -> Option<MicSessionLease> {
+        loop {
+            let wait_for = {
+                let mut inner = self.inner.lock().ok()?;
+                if !inner.desired_enabled {
+                    inner.lifecycle = MicLifecycle::Stopped;
+                    return None;
+                }
+
+                let target_generation = inner.generation;
+                if let Some(active) = inner.active.as_ref() {
+                    if active.generation == target_generation {
+                        return None;
+                    }
+                    active.cancel.store(true, Ordering::Release);
+                    Some((active.done.clone(), active.completed.clone()))
+                } else {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    inner.active = Some(ActiveMicSession {
+                        generation: target_generation,
+                        cancel: cancel.clone(),
+                        done: Arc::new(AtomicBool::new(false)),
+                        completed: Arc::new(Notify::new()),
+                    });
+                    inner.lifecycle = MicLifecycle::Running;
+                    return Some(MicSessionLease {
+                        generation: target_generation,
+                        cancel,
+                    });
+                }
+            };
+
+            if let Some((done, completed)) = wait_for {
+                while !done.load(Ordering::Acquire) {
+                    let notified = completed.notified();
+                    if done.load(Ordering::Acquire) {
+                        break;
+                    }
+                    notified.await;
+                }
+            }
+        }
+    }
+
+    fn finish_session(&self, generation: u64) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let Some(active) = inner.active.as_ref() else {
+            return;
+        };
+        if active.generation != generation {
+            return;
+        }
+
+        active.done.store(true, Ordering::Release);
+        active.completed.notify_waiters();
+        inner.active = None;
+        inner.lifecycle = if inner.desired_enabled {
+            MicLifecycle::Starting
+        } else {
+            MicLifecycle::Stopped
+        };
+    }
+
+    fn should_report_error(&self, generation: u64) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.desired_enabled && inner.generation == generation)
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> (u64, bool, MicLifecycle, Option<u64>) {
+        let inner = self.inner.lock().expect("session lock");
+        (
+            inner.generation,
+            inner.desired_enabled,
+            inner.lifecycle,
+            inner.active.as_ref().map(|active| active.generation),
+        )
+    }
+}
+
 // 定义我们要传给前端的数据格式
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ProcessInfo {
     pid: u32,
     name: String,
@@ -167,14 +336,15 @@ fn set_mic_boost(val: f32, state: tauri::State<'_, AppState>) {
 }
 
 #[tauri::command]
-fn toggle_rust_mic(enable: bool, state: tauri::State<'_, AppState>) {
-    if let Ok(mut guard) = state.is_mic_running.lock() {
-        *guard = enable;
-    }
+fn toggle_rust_mic(enable: bool, state: tauri::State<'_, AppState>) -> Result<u64, String> {
+    state.mic_sessions.request_enabled(enable)
 }
 
 #[tauri::command]
-fn set_rust_mic_device_id(device_id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn set_rust_mic_device_id(
+    device_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let normalized = device_id.trim().to_string();
     let mut guard = state
         .selected_mic_device_id
@@ -210,13 +380,19 @@ fn list_capture_devices() -> Result<Vec<AudioDeviceInfo>, String> {
         let mut devices = Vec::new();
 
         // 1) 系统默认麦克风：value 为空字符串，Rust 侧会按默认设备打开。
-        if let Ok(default_device) = unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eMultimedia) } {
+        if let Ok(default_device) =
+            unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eMultimedia) }
+        {
             let default_id = get_device_id_string(&default_device).unwrap_or_default();
             let default_name = get_device_friendly_name(&default_device)
                 .unwrap_or_else(|_| "系统默认麦克风".to_string());
             devices.push(AudioDeviceInfo {
                 id: String::new(),
-                name: format!("默认值 - {}{}", default_name, short_device_suffix(&default_id)),
+                name: format!(
+                    "默认值 - {}{}",
+                    default_name,
+                    short_device_suffix(&default_id)
+                ),
             });
         } else {
             devices.push(AudioDeviceInfo {
@@ -226,10 +402,12 @@ fn list_capture_devices() -> Result<Vec<AudioDeviceInfo>, String> {
         }
 
         // 2) 通信默认麦克风：截图里的“通信 - 麦克风 (...)”。
-        if let Ok(comm_device) = unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eCommunications) } {
+        if let Ok(comm_device) =
+            unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eCommunications) }
+        {
             let comm_id = get_device_id_string(&comm_device).unwrap_or_default();
-            let comm_name = get_device_friendly_name(&comm_device)
-                .unwrap_or_else(|_| "通信麦克风".to_string());
+            let comm_name =
+                get_device_friendly_name(&comm_device).unwrap_or_else(|_| "通信麦克风".to_string());
             devices.push(AudioDeviceInfo {
                 id: "__communications__".to_string(),
                 name: format!("通信 - {}{}", comm_name, short_device_suffix(&comm_id)),
@@ -237,21 +415,20 @@ fn list_capture_devices() -> Result<Vec<AudioDeviceInfo>, String> {
         }
 
         // 3) 所有已启用输入设备。
-        let collection: IMMDeviceCollection = unsafe {
-            enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)
-        }
-        .map_err(|e| hr_msg("枚举输入设备失败", e.code()))?;
+        let collection: IMMDeviceCollection =
+            unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) }
+                .map_err(|e| hr_msg("枚举输入设备失败", e.code()))?;
 
         let count = unsafe { collection.GetCount() }
             .map_err(|e| hr_msg("获取输入设备数量失败", e.code()))?;
 
         for i in 0..count {
-            let device = unsafe { collection.Item(i) }
-                .map_err(|e| hr_msg("读取输入设备失败", e.code()))?;
+            let device =
+                unsafe { collection.Item(i) }.map_err(|e| hr_msg("读取输入设备失败", e.code()))?;
 
             let id = get_device_id_string(&device)?;
-            let friendly_name = get_device_friendly_name(&device)
-                .unwrap_or_else(|_| format!("麦克风 {}", i + 1));
+            let friendly_name =
+                get_device_friendly_name(&device).unwrap_or_else(|_| format!("麦克风 {}", i + 1));
 
             devices.push(AudioDeviceInfo {
                 id: id.clone(),
@@ -271,11 +448,9 @@ fn list_capture_devices() -> Result<Vec<AudioDeviceInfo>, String> {
 
 #[cfg(target_os = "windows")]
 fn get_device_id_string(device: &IMMDevice) -> Result<String, String> {
-    let id_ptr = unsafe { device.GetId() }
-        .map_err(|e| hr_msg("读取输入设备 ID 失败", e.code()))?;
+    let id_ptr = unsafe { device.GetId() }.map_err(|e| hr_msg("读取输入设备 ID 失败", e.code()))?;
 
-    let id = unsafe { id_ptr.to_string() }
-        .map_err(|e| format!("输入设备 ID 转字符串失败: {e}"))?;
+    let id = unsafe { id_ptr.to_string() }.map_err(|e| format!("输入设备 ID 转字符串失败: {e}"))?;
 
     unsafe {
         CoTaskMemFree(Some(id_ptr.as_ptr() as *const std::ffi::c_void));
@@ -297,7 +472,10 @@ fn get_device_friendly_name(device: &IMMDevice) -> Result<String, String> {
     let result = (|| -> Result<String, String> {
         let vt = unsafe { prop.Anonymous.Anonymous.vt };
         if vt != VT_LPWSTR {
-            return Err(format!("设备 FriendlyName 类型不是 VT_LPWSTR，实际 vt={:?}", vt));
+            return Err(format!(
+                "设备 FriendlyName 类型不是 VT_LPWSTR，实际 vt={:?}",
+                vt
+            ));
         }
 
         let name_ptr = unsafe { prop.Anonymous.Anonymous.Anonymous.pwszVal };
@@ -588,9 +766,244 @@ async fn start_audio_pump(
     }
 }
 
+const MIC_FRAME_SAMPLES: usize = 480;
+const MIC_QUEUE_CAPACITY_FRAMES: usize = 24;
+
+struct AudioFrame {
+    seq: u64,
+    captured_at_micros: u64,
+    payload: Vec<u8>,
+    silent: bool,
+    discontinuity: bool,
+}
+
+#[derive(Default)]
+struct AudioMetrics {
+    captured_frames: AtomicU64,
+    sent_frames: AtomicU64,
+    queue_high_water: AtomicUsize,
+    queue_overloads: AtomicU64,
+    dropped_frames: AtomicU64,
+    discontinuities: AtomicU64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioMetricsSnapshot {
+    generation: u64,
+    captured_frames: u64,
+    sent_frames: u64,
+    queue_high_water: usize,
+    queue_overloads: u64,
+    dropped_frames: u64,
+    discontinuities: u64,
+}
+
+impl AudioMetrics {
+    fn snapshot(&self, generation: u64) -> AudioMetricsSnapshot {
+        AudioMetricsSnapshot {
+            generation,
+            captured_frames: self.captured_frames.load(Ordering::Relaxed),
+            sent_frames: self.sent_frames.load(Ordering::Relaxed),
+            queue_high_water: self.queue_high_water.load(Ordering::Relaxed),
+            queue_overloads: self.queue_overloads.load(Ordering::Relaxed),
+            dropped_frames: self.dropped_frames.load(Ordering::Relaxed),
+            discontinuities: self.discontinuities.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct AudioFrameQueueInner {
+    frames: VecDeque<AudioFrame>,
+    closed: bool,
+}
+
+struct AudioFrameQueue {
+    capacity: usize,
+    inner: Mutex<AudioFrameQueueInner>,
+    available: Notify,
+}
+
+impl AudioFrameQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(2),
+            inner: Mutex::new(AudioFrameQueueInner {
+                frames: VecDeque::new(),
+                closed: false,
+            }),
+            available: Notify::new(),
+        }
+    }
+
+    fn push(&self, mut frame: AudioFrame, metrics: &AudioMetrics) -> bool {
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
+        };
+        if inner.closed {
+            return false;
+        }
+
+        if inner.frames.len() >= self.capacity {
+            // 队列满时优先移除最旧的静音帧；没有静音边界才移除最旧帧。
+            let remove_index = inner
+                .frames
+                .iter()
+                .position(|candidate| candidate.silent)
+                .unwrap_or(0);
+            inner.frames.remove(remove_index);
+            frame.discontinuity = true;
+            metrics.queue_overloads.fetch_add(1, Ordering::Relaxed);
+            metrics.dropped_frames.fetch_add(1, Ordering::Relaxed);
+            metrics.discontinuities.fetch_add(1, Ordering::Relaxed);
+        }
+
+        inner.frames.push_back(frame);
+        metrics
+            .queue_high_water
+            .fetch_max(inner.frames.len(), Ordering::Relaxed);
+        drop(inner);
+        self.available.notify_one();
+        true
+    }
+
+    async fn pop(&self) -> Option<AudioFrame> {
+        loop {
+            let notified = self.available.notified();
+            {
+                let mut inner = self.inner.lock().ok()?;
+                if let Some(frame) = inner.frames.pop_front() {
+                    return Some(frame);
+                }
+                if inner.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.closed = true;
+        }
+        self.available.notify_waiters();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|inner| inner.frames.len())
+            .unwrap_or(0)
+    }
+}
+
+struct VadGate {
+    pre_roll: VecDeque<[f32; MIC_FRAME_SAMPLES]>,
+    pre_roll_frames: usize,
+    hangover_frames: usize,
+    remaining_hangover: usize,
+    open: bool,
+    gain: f32,
+    debug: bool,
+}
+
+impl VadGate {
+    fn new(debug: bool) -> Self {
+        Self {
+            pre_roll: VecDeque::with_capacity(13),
+            pre_roll_frames: 12,
+            hangover_frames: 32,
+            remaining_hangover: 0,
+            open: false,
+            gain: 0.0,
+            debug,
+        }
+    }
+
+    fn transition(&mut self, next_open: bool, vad_prob: f32, volume: f32) {
+        if self.open == next_open {
+            return;
+        }
+        self.open = next_open;
+        if self.debug {
+            println!(
+                "[vad] transition={} probability={:.3} volume={:.1}",
+                if next_open { "open" } else { "closed" },
+                vad_prob,
+                volume
+            );
+        }
+    }
+
+    fn process_frame(
+        &mut self,
+        frame: [f32; MIC_FRAME_SAMPLES],
+        vad_probability: f32,
+        volume_percent: f32,
+        threshold: f32,
+    ) -> Option<[f32; MIC_FRAME_SAMPLES]> {
+        let probability = if vad_probability.is_finite() {
+            vad_probability.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let volume = if volume_percent.is_finite() {
+            volume_percent.max(0.0)
+        } else {
+            0.0
+        };
+        let open_threshold = threshold.max(0.0);
+        let close_threshold = (open_threshold - 4.0).max(0.0);
+        let strong_voice = probability >= 0.15 && volume >= open_threshold;
+        let continuing_voice = probability >= 0.08 || volume >= close_threshold;
+
+        if strong_voice {
+            self.remaining_hangover = self.hangover_frames;
+            self.transition(true, probability, volume);
+        } else if self.open {
+            if continuing_voice {
+                self.remaining_hangover = self.hangover_frames;
+            } else if self.remaining_hangover > 0 {
+                self.remaining_hangover -= 1;
+            } else {
+                self.transition(false, probability, volume);
+            }
+        }
+
+        // 固定约 120ms 延迟让开门判断可以作用到辅音之前的帧，而不是突发补发旧帧。
+        self.pre_roll.push_back(frame);
+        if self.pre_roll.len() <= self.pre_roll_frames {
+            return None;
+        }
+        let delayed = self.pre_roll.pop_front()?;
+        let target_gain = if self.open { 1.0 } else { 0.0 };
+        let coefficient = if self.open { 0.02 } else { 0.0005 };
+        let mut output = [0.0f32; MIC_FRAME_SAMPLES];
+        for (index, sample) in delayed.into_iter().enumerate() {
+            self.gain += (target_gain - self.gain) * coefficient;
+            output[index] = soft_limit(sample * self.gain).clamp(-0.96, 0.96);
+        }
+        Some(output)
+    }
+
+    #[cfg(test)]
+    fn is_open(&self) -> bool {
+        self.open
+    }
+}
+
+fn unix_time_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
 async fn start_mic_pump(
     app_handle: tauri::AppHandle,
-    state_running: Arc<Mutex<bool>>,
+    mic_sessions: Arc<MicSessionManager>,
     state_threshold: Arc<Mutex<f32>>,
     state_boost: Arc<Mutex<f32>>, // 👈 接收增益参数
     selected_mic_device_id: Arc<Mutex<Option<String>>>,
@@ -607,9 +1020,9 @@ async fn start_mic_pump(
 
     while let Ok((stream, _)) = listener.accept().await {
         let app_handle_clone = app_handle.clone();
-        let running_clone = state_running.clone();
+        let mic_sessions_clone = mic_sessions.clone();
         let threshold_clone = state_threshold.clone();
-        let boost_clone = state_boost.clone(); // 👈 核心修复：克隆增益状态
+        let boost_clone = state_boost.clone();
         let selected_mic_device_id_clone = selected_mic_device_id.clone();
 
         tokio::spawn(async move {
@@ -618,39 +1031,80 @@ async fn start_mic_pump(
                 Err(_) => return,
             };
 
-            let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<u8>>(64);
+            let Some(session) = mic_sessions_clone.begin_session().await else {
+                let _ = ws_stream.close(None).await;
+                return;
+            };
+            let generation = session.generation;
+            let queue = Arc::new(AudioFrameQueue::new(MIC_QUEUE_CAPACITY_FRAMES));
+            let metrics = Arc::new(AudioMetrics::default());
 
             // 启动 Windows 底层捕获线程
             let app_handle_for_capture = app_handle_clone.clone();
             let app_handle_for_error = app_handle_clone.clone();
-            let running_for_capture = running_clone.clone();
-            let running_for_cleanup = running_clone.clone();
             let threshold_for_capture = threshold_clone.clone();
             let boost_for_capture = boost_clone.clone();
             let selected_mic_device_id_for_capture = selected_mic_device_id_clone.clone();
+            let cancel_for_capture = session.cancel.clone();
+            let queue_for_capture = queue.clone();
+            let metrics_for_capture = metrics.clone();
 
             let capture_handle = tokio::task::spawn_blocking(move || {
-                run_mic_capture(
+                let result = run_mic_capture(
                     app_handle_for_capture,
-                    running_for_capture,
+                    generation,
+                    cancel_for_capture,
                     threshold_for_capture,
                     boost_for_capture,
                     selected_mic_device_id_for_capture,
-                    pcm_tx,
-                )
+                    queue_for_capture.clone(),
+                    metrics_for_capture,
+                );
+                queue_for_capture.close();
+                result
             });
 
             // 持续向前端 9002 端口推送处理好的音频流
-            while let Some(chunk) = pcm_rx.recv().await {
-                if ws_stream.send(Message::Binary(chunk.into())).await.is_err() {
-                    println!("⚠️ 前端麦克风 WebSocket 断开，准备停止 Rust 麦克风捕获");
+            while let Some(frame) = queue.pop().await {
+                if session.cancel.load(Ordering::Acquire) {
                     break;
+                }
+                let metadata = serde_json::json!({
+                    "type": "pcm_frame_meta",
+                    "seq": frame.seq,
+                    "capturedAtMicros": frame.captured_at_micros,
+                    "discontinuity": frame.discontinuity,
+                });
+                let metadata_result = ws_stream.send(Message::Text(metadata.to_string())).await;
+                let audio_result = if metadata_result.is_ok() {
+                    ws_stream.send(Message::Binary(frame.payload.into())).await
+                } else {
+                    metadata_result
+                };
+                if audio_result.is_err() {
+                    println!("⚠️ 前端麦克风 WebSocket 断开，准备停止 Rust 麦克风捕获");
+                    session.cancel.store(true, Ordering::Release);
+                    break;
+                }
+                let sent = metrics.sent_frames.fetch_add(1, Ordering::Relaxed) + 1;
+                if sent % 200 == 0 {
+                    let snapshot = metrics.snapshot(generation);
+                    println!(
+                        "[mic_metrics] generation={} captured={} sent={} queueHighWater={} overloads={} dropped={} discontinuities={}",
+                        snapshot.generation,
+                        snapshot.captured_frames,
+                        snapshot.sent_frames,
+                        snapshot.queue_high_water,
+                        snapshot.queue_overloads,
+                        snapshot.dropped_frames,
+                        snapshot.discontinuities,
+                    );
+                    let _ = app_handle_clone.emit("mic_audio_metrics", snapshot);
                 }
             }
 
-            if let Ok(mut guard) = running_for_cleanup.lock() {
-                *guard = false;
-            }
+            session.cancel.store(true, Ordering::Release);
+            queue.close();
 
             match capture_handle.await {
                 Ok(Ok(())) => {
@@ -658,13 +1112,20 @@ async fn start_mic_pump(
                 }
                 Ok(Err(e)) => {
                     println!("❌ Rust 麦克风捕获失败: {e}");
-                    let _ = app_handle_for_error.emit("mic_error", e);
+                    if mic_sessions_clone.should_report_error(generation) {
+                        let _ = app_handle_for_error.emit("mic_error", e);
+                    }
                 }
                 Err(e) => {
                     println!("❌ Rust 麦克风线程 Join 失败: {e}");
-                    let _ = app_handle_for_error.emit("mic_error", e.to_string());
+                    if mic_sessions_clone.should_report_error(generation) {
+                        let _ = app_handle_for_error.emit("mic_error", e.to_string());
+                    }
                 }
             }
+            let final_snapshot = metrics.snapshot(generation);
+            let _ = app_handle_clone.emit("mic_audio_metrics", final_snapshot);
+            mic_sessions_clone.finish_session(generation);
         });
     }
 }
@@ -919,8 +1380,12 @@ fn get_capture_device_by_id(device_id: &str) -> Result<IMMDevice, String> {
             .map_err(|e| hr_msg("创建 IMMDeviceEnumerator 失败", e.code()))?;
 
     let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe { enumerator.GetDevice(PCWSTR(wide.as_ptr())) }
-        .map_err(|e| hr_msg(&format!("根据设备 ID 获取麦克风失败: {device_id}"), e.code()))
+    unsafe { enumerator.GetDevice(PCWSTR(wide.as_ptr())) }.map_err(|e| {
+        hr_msg(
+            &format!("根据设备 ID 获取麦克风失败: {device_id}"),
+            e.code(),
+        )
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -938,273 +1403,6 @@ fn get_configured_capture_device(
         _ => get_default_capture_device(),
     }
 }
-
-/*#[cfg(target_os = "windows")]  用了Rnnnoise
-fn run_mic_capture(
-    app_handle: tauri::AppHandle,
-    state_running: Arc<Mutex<bool>>,
-    state_threshold: Arc<Mutex<f32>>,
-    state_boost: Arc<Mutex<f32>>,
-    selected_mic_device_id: Arc<Mutex<Option<String>>>,
-    pcm_tx: mpsc::Sender<Vec<u8>>,
-) -> Result<(), String> {
-    let mut should_uninit = false;
-    match unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) } {
-        Ok(()) => {
-            should_uninit = true;
-        }
-        Err(e) if e.code() == HRESULT(0x80010106u32 as i32) => {
-            // RPC_E_CHANGED_MODE: 当前线程已用其他模式初始化过 COM，可继续使用，但不要 CoUninitialize
-        }
-        Err(e) => {
-            return Err(hr_msg("初始化 COM 失败", e.code()));
-        }
-    }
-
-    let result = (|| -> Result<(), String> {
-        let device = get_configured_capture_device(&selected_mic_device_id)?;
-        let audio_client: IAudioClient = match unsafe { device.Activate(CLSCTX_ALL, None) } {
-            Ok(v) => v,
-            Err(e) => return Err(hr_msg("激活麦克风 IAudioClient 失败", e.code())),
-        };
-
-        let mix_format_ptr = match unsafe { audio_client.GetMixFormat() } {
-            Ok(v) => v,
-            Err(e) => return Err(hr_msg("获取麦克风格式失败", e.code())),
-        };
-
-        let channels = unsafe { (*mix_format_ptr).nChannels };
-        let src_channels = if channels == 0 {
-            1usize
-        } else {
-            channels as usize
-        };
-
-        let init_result = unsafe {
-            audio_client.Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                0,
-                0,
-                0,
-                mix_format_ptr as *const WAVEFORMATEX,
-                None,
-            )
-        };
-
-        unsafe { CoTaskMemFree(Some(mix_format_ptr as *const std::ffi::c_void)) };
-
-        if let Err(e) = init_result {
-            return Err(hr_msg("初始化麦克风失败", e.code()));
-        }
-
-        let capture_client: IAudioCaptureClient = match unsafe { audio_client.GetService() } {
-            Ok(v) => v,
-            Err(e) => return Err(hr_msg("获取麦克风捕获服务失败", e.code())),
-        };
-
-        unsafe { audio_client.Start() }.map_err(|e| hr_msg("启动麦克风采集失败", e.code()))?;
-        println!("Rust 麦克风接管已启动!");
-
-        // 低延迟软噪声门：避免阈值附近硬切导致“滋滋啦啦/断断续续”。
-        // 不做 AI 降噪，只做每个音频块的平滑开关，因此几乎不增加语音延迟。
-        let mut gate_gain = 0.0f32;
-        const GATE_ATTACK: f32 = 0.65;
-        const GATE_RELEASE: f32 = 0.08;
-        const GATE_FLOOR: f32 = 0.015;
-        const GATE_HYSTERESIS_PERCENT: f32 = 4.0;
-
-        loop {
-            // 安全退出检查
-            if let Ok(guard) = state_running.lock() {
-                if !*guard {
-                    break;
-                }
-            } else {
-                break;
-            }
-
-            let packet_frames = match unsafe { capture_client.GetNextPacketSize() } {
-                Ok(v) => v,
-                Err(e) if e.code() == AUDCLNT_E_DEVICE_INVALIDATED => {
-                    return Err(device_invalidated_err("GetNextPacketSize: 音频设备失效"));
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "GetNextPacketSize 失败, HRESULT={}",
-                        hr_hex(e.code())
-                    ))
-                }
-            };
-
-            if packet_frames == 0 {
-                std::thread::sleep(Duration::from_millis(2));
-                continue;
-            }
-
-            let mut data_ptr: *mut u8 = std::ptr::null_mut();
-            let mut frames_to_read: u32 = 0;
-            let mut flags: u32 = 0;
-
-            let get_buffer_result = unsafe {
-                capture_client.GetBuffer(&mut data_ptr, &mut frames_to_read, &mut flags, None, None)
-            };
-
-            if let Err(e) = get_buffer_result {
-                return Err(if e.code() == AUDCLNT_E_DEVICE_INVALIDATED {
-                    device_invalidated_err("GetBuffer: 音频设备失效")
-                } else {
-                    format!(
-                        "IAudioCaptureClient::GetBuffer 失败, HRESULT={}",
-                        hr_hex(e.code())
-                    )
-                });
-            }
-
-            let mut should_stop = false;
-            let payload: Vec<u8>;
-            let output_bytes = (frames_to_read as usize).saturating_mul(std::mem::size_of::<f32>());
-
-            if frames_to_read > 0 {
-                if data_ptr.is_null() || (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
-                    payload = vec![0u8; output_bytes];
-                } else {
-                    let expected_samples = match (frames_to_read as usize).checked_mul(src_channels)
-                    {
-                        Some(v) => v,
-                        None => {
-                            if let Err(e) = unsafe { capture_client.ReleaseBuffer(frames_to_read) }
-                            {
-                                return Err(format!(
-                                    "samples 计算溢出时 ReleaseBuffer 失败, HRESULT={}",
-                                    hr_hex(e.code())
-                                ));
-                            }
-                            return Err(format!(
-                                "检测到异常 samples 大小: frames_to_read={}, channels={}",
-                                frames_to_read, src_channels
-                            ));
-                        }
-                    };
-
-                    let f32_slice = unsafe {
-                        std::slice::from_raw_parts(data_ptr as *const f32, expected_samples)
-                    };
-                    let mut mono_samples = Vec::<f32>::with_capacity(frames_to_read as usize);
-                    let mut sum_squares = 0.0f32;
-
-                    let boost_multiplier = if let Ok(guard) = state_boost.lock() {
-                        *guard
-                    } else {
-                        1.0
-                    };
-
-                    for i in 0..frames_to_read as usize {
-                        let frame_start = i * src_channels;
-                        let left = f32_slice[frame_start];
-                        let right = if src_channels > 1 {
-                            f32_slice[frame_start + 1]
-                        } else {
-                            left
-                        };
-                        let mut mono = ((left + right) / 2.0) * boost_multiplier;
-                        mono = mono.clamp(-1.0, 1.0);
-
-                        sum_squares += mono * mono;
-                        mono_samples.push(mono);
-                    }
-
-                    let rms = (sum_squares / frames_to_read as f32).sqrt();
-                    let db = if rms > 0.0001 {
-                        20.0 * rms.log10()
-                    } else {
-                        -100.0
-                    };
-                    let volume_percent = ((db + 50.0) * 2.0).clamp(0.0, 100.0) as u32;
-                    let _ = app_handle.emit("mic_volume", volume_percent);
-
-                    let threshold = if let Ok(guard) = state_threshold.lock() {
-                        *guard
-                    } else {
-                        0.0
-                    };
-
-                    // 软门限 + 滞回：
-                    // - 音量超过阈值时快速打开；
-                    // - 音量略低于阈值时不马上关闭；
-                    // - 真正低于关闭阈值时缓慢释放，避免断续噪声。
-                    let open_threshold = threshold;
-                    let close_threshold = (threshold - GATE_HYSTERESIS_PERCENT).max(0.0);
-                    let volume = volume_percent as f32;
-                    let should_open = volume >= open_threshold
-                        || (gate_gain > GATE_FLOOR && volume >= close_threshold);
-
-                    let target_gain = if should_open { 1.0 } else { 0.0 };
-                    let coeff = if target_gain > gate_gain {
-                        GATE_ATTACK
-                    } else {
-                        GATE_RELEASE
-                    };
-                    gate_gain += (target_gain - gate_gain) * coeff;
-
-                    if gate_gain < GATE_FLOOR {
-                        payload = vec![0u8; output_bytes];
-                    } else {
-                        let mut gated_data = Vec::<u8>::with_capacity(output_bytes);
-                        for sample in mono_samples {
-                            let gated = (sample * gate_gain).clamp(-1.0, 1.0);
-                            gated_data.extend_from_slice(&gated.to_le_bytes());
-                        }
-                        payload = gated_data;
-                    }
-                }
-
-                if pcm_tx.blocking_send(payload).is_err() {
-                    should_stop = true;
-                }
-            }
-
-            if let Err(e) = unsafe { capture_client.ReleaseBuffer(frames_to_read) } {
-                return Err(hr_msg("释放麦克风 Buffer 失败", e.code()));
-            }
-
-            if should_stop {
-                break;
-            }
-
-            let next_packet_frames = match unsafe { capture_client.GetNextPacketSize() } {
-                Ok(v) => v,
-                Err(e) if e.code() == AUDCLNT_E_DEVICE_INVALIDATED => {
-                    return Err(device_invalidated_err(
-                        "GetNextPacketSize(循环): 音频设备失效",
-                    ));
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "GetNextPacketSize(循环) 失败, HRESULT={}",
-                        hr_hex(e.code())
-                    ))
-                }
-            };
-
-            if next_packet_frames == 0 {
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        }
-
-        if let Err(e) = unsafe { audio_client.Stop() } {
-            println!("⚠️ audio_client.Stop() 失败: {}", hr_hex(e.code()));
-        }
-
-        Ok(())
-    })();
-
-    if should_uninit {
-        unsafe { CoUninitialize() };
-    }
-
-    result
-}
-*/
 
 // 防炸麦软拐点限幅器。
 // 设计目标：尽量保留小音量动态；大音量只做平滑压缩，避免硬削顶形成方波失真。
@@ -1234,11 +1432,13 @@ fn soft_limit(sample: f32) -> f32 {
 #[cfg(target_os = "windows")]
 fn run_mic_capture(
     app_handle: tauri::AppHandle,
-    state_running: Arc<Mutex<bool>>,
+    generation: u64,
+    cancel: Arc<AtomicBool>,
     state_threshold: Arc<Mutex<f32>>,
     state_boost: Arc<Mutex<f32>>,
     selected_mic_device_id: Arc<Mutex<Option<String>>>,
-    pcm_tx: mpsc::Sender<Vec<u8>>,
+    queue: Arc<AudioFrameQueue>,
+    metrics: Arc<AudioMetrics>,
 ) -> Result<(), String> {
     let mut should_uninit = false;
     match unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) } {
@@ -1299,20 +1499,14 @@ fn run_mic_capture(
         // 🌟 初始化神经网络降噪器 和 样本缓冲区
         let mut denoise = nnnoiseless::DenoiseState::new();
         let mut sample_buffer: Vec<f32> = Vec::with_capacity(1024);
-
-        // 🌟 保留你极其优秀的滞回平滑包络逻辑
-        let mut gate_gain = 0.0f32;
-        const GATE_ATTACK: f32 = 0.65;
-        const GATE_RELEASE: f32 = 0.08;
-        const GATE_FLOOR: f32 = 0.015;
-        const GATE_HYSTERESIS_PERCENT: f32 = 4.0; 
+        let vad_debug = std::env::var("DONICHANNEL_VAD_DEBUG")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let mut vad_gate = VadGate::new(vad_debug);
+        let mut frame_seq = 0u64;
 
         loop {
-            if let Ok(guard) = state_running.lock() {
-                if !*guard {
-                    break;
-                }
-            } else {
+            if cancel.load(Ordering::Acquire) {
                 break;
             }
 
@@ -1322,7 +1516,10 @@ fn run_mic_capture(
                     return Err(device_invalidated_err("GetNextPacketSize: 音频设备失效"));
                 }
                 Err(e) => {
-                    return Err(format!("GetNextPacketSize 失败, HRESULT={}", hr_hex(e.code())))
+                    return Err(format!(
+                        "GetNextPacketSize 失败, HRESULT={}",
+                        hr_hex(e.code())
+                    ))
                 }
             };
 
@@ -1364,7 +1561,7 @@ fn run_mic_capture(
                     }
                 }
 
-                    while sample_buffer.len() >= 480 {
+                while sample_buffer.len() >= 480 {
                     let mut in_frame = [0.0f32; 480];
                     // 🌟 核心修复 1：量纲转换
                     // 将 WASAPI 的 [-1.0, 1.0] 放大到 RNNoise 要求的 [-32768.0, 32767.0] 量级
@@ -1438,56 +1635,41 @@ fn run_mic_capture(
 
                     let _ = app_handle.emit("mic_volume", volume_percent);
 
-                    // ==========================================
-                    // 物理滞回门限 + AI 概率双重锁
-                    // ==========================================
                     let threshold = if let Ok(guard) = state_threshold.lock() {
                         *guard
                     } else {
                         0.0
                     };
 
-                    let close_threshold = (threshold - GATE_HYSTERESIS_PERCENT).max(0.0);
-                    let volume = volume_percent as f32;
-
-                    let volume_ok = volume >= threshold
-                        || (gate_gain > GATE_FLOOR && volume >= close_threshold);
-
-                    let is_voice = vad_prob > 0.15;
-                    let should_open = volume_ok && (is_voice || gate_gain > GATE_FLOOR);
-
-                    let target_gain = if should_open { 1.0 } else { 0.0 };
-                    let coeff = if target_gain > gate_gain {
-                        GATE_ATTACK
-                    } else {
-                        GATE_RELEASE
-                    };
-                    gate_gain += (target_gain - gate_gain) * coeff;
-
-                    let payload = if gate_gain < GATE_FLOOR {
-                        vec![0u8; 480 * 4]
-                    } else {
-                        let mut gated_data = Vec::<u8>::with_capacity(480 * 4);
-
-                        for sample in normalized_frame {
-                            let gated = soft_limit(sample * gate_gain).clamp(-0.96, 0.96);
-                            gated_data.extend_from_slice(&gated.to_le_bytes());
+                    let captured = metrics.captured_frames.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(gated_frame) = vad_gate.process_frame(
+                        normalized_frame,
+                        vad_prob,
+                        volume_percent as f32,
+                        threshold,
+                    ) {
+                        let silent = gated_frame.iter().all(|sample| sample.abs() < 0.002);
+                        let mut payload = Vec::<u8>::with_capacity(MIC_FRAME_SAMPLES * 4);
+                        for sample in gated_frame {
+                            payload.extend_from_slice(&sample.to_le_bytes());
                         }
-
-                        gated_data
-                    };
-
-                    // 非阻塞发送
-                    match pcm_tx.try_send(payload) {
-                        Ok(()) => {} // 发送成功
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            // 通道满了，直接丢弃当前帧，绝不阻塞采集线程
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            // 只有前端 WebSocket 真正断开时，才停止采集
+                        let frame = AudioFrame {
+                            seq: frame_seq,
+                            captured_at_micros: unix_time_micros(),
+                            payload,
+                            silent,
+                            discontinuity: false,
+                        };
+                        frame_seq = frame_seq.saturating_add(1);
+                        if !queue.push(frame, &metrics) {
                             should_stop = true;
                             break;
                         }
+                    }
+
+                    if captured % 200 == 0 {
+                        let snapshot = metrics.snapshot(generation);
+                        let _ = app_handle.emit("mic_audio_metrics", snapshot);
                     }
                 }
             }
@@ -1721,7 +1903,6 @@ fn run_capture_for_pid_inner(
     Ok(())
 }
 
-
 #[cfg(not(target_os = "windows"))]
 fn run_capture_for_pid(
     _pid: u32,
@@ -1730,41 +1911,6 @@ fn run_capture_for_pid(
 ) -> Result<(), String> {
     Err("当前平台不支持 WASAPI 进程回环捕获，仅 Windows 可用".into())
 }
-
-/*#[tauri::command]    这一段是原本的查询麦克风采样率的指令实现
-#[cfg(target_os = "windows")]
-fn query_mic_sample_rate(state: tauri::State<'_, AppState>) -> Result<u32, String> {
-    let mut should_uninit = false;
-    match unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) } {
-        Ok(()) => {
-            should_uninit = true;
-        }
-        Err(e) if e.code() == HRESULT(0x80010106u32 as i32) => {}
-        Err(e) => return Err(hr_msg("查询麦克风采样率时 CoInitialize 失败", e.code())),
-    }
-
-    let result = (|| -> Result<u32, String> {
-        let device = get_configured_capture_device(&state.selected_mic_device_id)?;
-        let client: IAudioClient = match unsafe { device.Activate(CLSCTX_ALL, None) } {
-            Ok(v) => v,
-            Err(e) => return Err(hr_msg("查询麦克风采样率时 Activate 失败", e.code())),
-        };
-
-        let mix_format_ptr = match unsafe { client.GetMixFormat() } {
-            Ok(v) => v,
-            Err(e) => return Err(hr_msg("查询麦克风采样率时 GetMixFormat 失败", e.code())),
-        };
-
-        let sample_rate = unsafe { (*mix_format_ptr).nSamplesPerSec };
-        unsafe { CoTaskMemFree(Some(mix_format_ptr as *const std::ffi::c_void)) };
-        Ok(sample_rate)
-    })();
-
-    if should_uninit {
-        unsafe { CoUninitialize() };
-    }
-    result
-}*/
 
 #[tauri::command]
 fn query_mic_sample_rate() -> Result<u32, String> {
@@ -1779,7 +1925,7 @@ pub fn run() {
 
     // 初始化麦克风状态
     let mic_vad_threshold = Arc::new(Mutex::new(20.0f32));
-    let is_mic_running = Arc::new(Mutex::new(false));
+    let mic_sessions = Arc::new(MicSessionManager::new());
     let mic_boost = Arc::new(Mutex::new(5.0f32)); // 默认 5.0 倍放大
     let selected_mic_device_id = Arc::new(Mutex::new(None::<String>));
 
@@ -1788,7 +1934,7 @@ pub fn run() {
             capture_tx: capture_tx.clone(),
             latest_capture_pids: latest_capture_pids.clone(),
             mic_vad_threshold: mic_vad_threshold.clone(),
-            is_mic_running: is_mic_running.clone(),
+            mic_sessions: mic_sessions.clone(),
             mic_boost: mic_boost.clone(), // 👈 挂载到状态机
             selected_mic_device_id: selected_mic_device_id.clone(),
         })
@@ -1803,14 +1949,14 @@ pub fn run() {
 
             // 🌟 启动麦克风采集服务 (9002)
             let app_handle = app.handle().clone();
-            let state_running = app.state::<AppState>().is_mic_running.clone();
+            let mic_sessions = app.state::<AppState>().mic_sessions.clone();
             let state_threshold = app.state::<AppState>().mic_vad_threshold.clone();
             let state_boost = app.state::<AppState>().mic_boost.clone();
             let selected_mic_device_id = app.state::<AppState>().selected_mic_device_id.clone();
             tauri::async_runtime::spawn(async move {
                 start_mic_pump(
                     app_handle,
-                    state_running,
+                    mic_sessions,
                     state_threshold,
                     state_boost,
                     selected_mic_device_id,
@@ -1835,5 +1981,123 @@ pub fn run() {
         .run(tauri::generate_context!())
     {
         println!("❌ tauri 运行失败: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn audio_frame(value: f32) -> [f32; MIC_FRAME_SAMPLES] {
+        [value; MIC_FRAME_SAMPLES]
+    }
+
+    fn queued_frame(seq: u64, silent: bool) -> AudioFrame {
+        AudioFrame {
+            seq,
+            captured_at_micros: seq,
+            payload: vec![0; MIC_FRAME_SAMPLES * 4],
+            silent,
+            discontinuity: false,
+        }
+    }
+
+    #[test]
+    fn vad_preroll_preserves_speech_onset_after_silence() {
+        let mut gate = VadGate::new(false);
+        let mut output_peak = 0.0f32;
+        for _ in 0..16 {
+            let _ = gate.process_frame(audio_frame(0.0), 0.0, 0.0, 20.0);
+        }
+        for _ in 0..3 {
+            let _ = gate.process_frame(audio_frame(0.25), 0.9, 50.0, 20.0);
+        }
+        for _ in 0..16 {
+            if let Some(output) = gate.process_frame(audio_frame(0.0), 0.0, 0.0, 20.0) {
+                output_peak = output_peak.max(
+                    output
+                        .iter()
+                        .fold(0.0f32, |peak, sample| peak.max(sample.abs())),
+                );
+            }
+        }
+        assert!(output_peak > 0.1, "前滚缓冲应保留语音开头");
+    }
+
+    #[test]
+    fn vad_short_word_is_not_discarded() {
+        let mut gate = VadGate::new(false);
+        let mut non_silent_frames = 0;
+        for _ in 0..14 {
+            let _ = gate.process_frame(audio_frame(0.0), 0.0, 0.0, 20.0);
+        }
+        for _ in 0..2 {
+            let _ = gate.process_frame(audio_frame(0.2), 0.8, 45.0, 20.0);
+        }
+        for _ in 0..20 {
+            if let Some(output) = gate.process_frame(audio_frame(0.0), 0.0, 0.0, 20.0) {
+                if output.iter().any(|sample| sample.abs() > 0.02) {
+                    non_silent_frames += 1;
+                }
+            }
+        }
+        assert!(non_silent_frames >= 2);
+    }
+
+    #[test]
+    fn vad_hangover_survives_short_pause_and_nan() {
+        let mut gate = VadGate::new(false);
+        let _ = gate.process_frame(audio_frame(0.2), 0.9, 50.0, 20.0);
+        for _ in 0..12 {
+            let _ = gate.process_frame(audio_frame(0.0), f32::NAN, 0.0, 20.0);
+        }
+        assert!(gate.is_open(), "短暂停顿或 NaN 不应立即关门");
+    }
+
+    #[test]
+    fn vad_keeps_fading_tail_and_resists_threshold_jitter() {
+        let mut gate = VadGate::new(false);
+        let _ = gate.process_frame(audio_frame(0.3), 0.9, 50.0, 20.0);
+        for index in 0..20 {
+            let level = if index % 2 == 0 { 19.0 } else { 21.0 };
+            let amplitude = 0.15 * (1.0 - index as f32 / 24.0);
+            let _ = gate.process_frame(audio_frame(amplitude), 0.1, level, 20.0);
+        }
+        assert!(gate.is_open(), "句尾衰减和阈值附近抖动应由 hangover 保持");
+    }
+
+    #[test]
+    fn bounded_queue_records_overload_and_discards_old_silence() {
+        let queue = AudioFrameQueue::new(2);
+        let metrics = AudioMetrics::default();
+        assert!(queue.push(queued_frame(0, true), &metrics));
+        assert!(queue.push(queued_frame(1, false), &metrics));
+        assert!(queue.push(queued_frame(2, false), &metrics));
+        assert_eq!(queue.len(), 2);
+        assert_eq!(metrics.queue_high_water.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.queue_overloads.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.dropped_frames.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.discontinuities.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn session_generation_isolates_old_task_completion() {
+        let manager = MicSessionManager::new();
+        let first_generation = manager.request_enabled(true).expect("start first");
+        let first = manager.begin_session().await.expect("first lease");
+        assert_eq!(first.generation, first_generation);
+
+        manager.request_enabled(false).expect("stop first");
+        let newest_generation = manager.request_enabled(true).expect("start newest");
+        assert!(first.cancel.load(Ordering::Acquire));
+        manager.finish_session(first_generation);
+
+        let newest = manager.begin_session().await.expect("newest lease");
+        assert_eq!(newest.generation, newest_generation);
+        manager.finish_session(first_generation);
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.0, newest_generation);
+        assert_eq!(snapshot.2, MicLifecycle::Running);
+        assert_eq!(snapshot.3, Some(newest_generation));
     }
 }

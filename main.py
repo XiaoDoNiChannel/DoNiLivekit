@@ -92,6 +92,13 @@ AVATAR_HISTORY_LIMIT_PER_USER = 12
 # 设置 DONICHANNEL_ADMIN_TOKEN 后，清空全部聊天记录必须带 X-Admin-Token 或 adminToken。
 CHAT_ADMIN_TOKEN = os.environ.get("DONICHANNEL_ADMIN_TOKEN", "").strip()
 
+# Presence 心跳由客户端每 10~15 秒发送一次；服务端 TTL 略大于客户端的
+# 30 秒 pong 超时，既能容忍短暂调度停顿，也能清理休眠/断网留下的幽灵成员。
+PRESENCE_TTL_SECONDS = float(os.environ.get("DONICHANNEL_PRESENCE_TTL_SECONDS", "45"))
+PRESENCE_CLEANUP_INTERVAL_SECONDS = float(
+    os.environ.get("DONICHANNEL_PRESENCE_CLEANUP_INTERVAL_SECONDS", "5")
+)
+
 app = FastAPI(title="DoNiChannel Backend", version="1.1.0")
 
 app.add_middleware(
@@ -554,6 +561,16 @@ class PresenceParticipant:
     status_text: str = "在线"
 
 
+@dataclass
+class PresenceConnection:
+    """一个 Presence socket 的生命周期记录。"""
+
+    websocket: WebSocket = field(repr=False)
+    generation: str = ""
+    connection_id: str = ""
+    last_seen: float = field(default_factory=time.monotonic)
+
+
 class PresenceManager:
     """
     管理大厅在线状态、语音频道成员状态。
@@ -562,10 +579,23 @@ class PresenceManager:
     聊天实时通信由 ChatManager / /ws/chat 负责。
     """
 
-    def __init__(self) -> None:
-        self.active_connections: Dict[str, WebSocket] = {}
+    def __init__(self, *, server_epoch: Optional[str] = None) -> None:
+        self.server_epoch = server_epoch or uuid.uuid4().hex
+        self.seq = 0
+        self.active_connections: Dict[str, PresenceConnection] = {}
         self.participants: Dict[str, PresenceParticipant] = {}
         self.lock = asyncio.Lock()
+
+    def _next_seq_locked(self) -> int:
+        self.seq += 1
+        return self.seq
+
+    def _version_payload(self, payload: dict, seq: Optional[int] = None) -> dict:
+        return {
+            **payload,
+            "serverEpoch": self.server_epoch,
+            "seq": self.seq if seq is None else seq,
+        }
 
     def build_snapshot(self) -> dict:
         """构建完整 Presence 快照（含头像字段）。"""
@@ -614,6 +644,8 @@ class PresenceManager:
 
         return {
             "type": "presence_snapshot",
+            "serverEpoch": self.server_epoch,
+            "seq": self.seq,
             "channels": channels,
             "participants": participants,
         }
@@ -629,7 +661,7 @@ class PresenceManager:
         status_text: str = "在线",
         user_id: str = "",
         connection_id: str = "",
-    ) -> bool:
+    ) -> Optional[str]:
         """
         注册 Presence WebSocket 连接。
 
@@ -642,21 +674,24 @@ class PresenceManager:
             await websocket.accept()
         except Exception as error:
             print(f"[presence] WebSocket accept 失败: identity={identity}, error={error}")
-            return False
+            return None
 
-        old_websocket = None
-        was_online = False
+        old_connection = None
         old_channel = None
+        generation = uuid.uuid4().hex
 
         async with self.lock:
-            old_websocket = self.active_connections.get(identity)
+            old_connection = self.active_connections.get(identity)
             old_participant = self.participants.get(identity)
 
             if old_participant:
-                was_online = True
                 old_channel = old_participant.current_channel
 
-            self.active_connections[identity] = websocket
+            self.active_connections[identity] = PresenceConnection(
+                websocket=websocket,
+                generation=generation,
+                connection_id=connection_id or identity,
+            )
             self.participants[identity] = PresenceParticipant(
                 identity=identity,
                 display_name=display_name,
@@ -668,30 +703,31 @@ class PresenceManager:
                 avatar_url=avatar_url,
                 status_text=status_text or "在线",
             )
+            event_seq = self._next_seq_locked()
+            snapshot = self.build_snapshot()
 
         # 持久化用户资料（供历史消息渲染使用）
         db_upsert_profile(user_id or identity, display_name, avatar_color, avatar_preset, avatar_url, status_text=status_text or "在线", user_id=user_id or identity)
 
-        if old_websocket and old_websocket is not websocket:
+        if old_connection and old_connection.websocket is not websocket:
             try:
-                await old_websocket.close(code=4000)
+                await old_connection.websocket.close(code=4000)
             except Exception:
                 pass
 
         try:
-            await websocket.send_text(
-                json.dumps(self.build_snapshot(), ensure_ascii=False)
-            )
+            await websocket.send_text(json.dumps(snapshot, ensure_ascii=False))
         except Exception as error:
             print(
                 f"[presence] 发送初始快照失败，按正常断开处理: "
                 f"identity={identity}, error={error}"
             )
-            await self.disconnect(identity, websocket)
-            return False
+            await self.disconnect(identity, websocket, generation)
+            return None
 
-        if not was_online:
-            await self.broadcast(
+        # 重连也广播 upsert，使其他客户端拿到新的 connectionId/资料；identity 去重。
+        await self.broadcast(
+            self._version_payload(
                 {
                     "type": "participant_online",
                     "participant": {
@@ -706,12 +742,18 @@ class PresenceManager:
                         "statusText": status_text or "在线",
                     },
                 },
-                exclude_identity=identity,
-            )
+                event_seq,
+            ),
+        )
 
-        return True
+        return generation
 
-    async def disconnect(self, identity: str, websocket: Optional[WebSocket] = None) -> None:
+    async def disconnect(
+        self,
+        identity: str,
+        websocket: Optional[WebSocket] = None,
+        generation: Optional[str] = None,
+    ) -> None:
         """
         注销 Presence 连接。
 
@@ -719,25 +761,82 @@ class PresenceManager:
         则直接忽略，不能误删新连接。
         """
         async with self.lock:
-            current_websocket = self.active_connections.get(identity)
+            current_connection = self.active_connections.get(identity)
 
-            if websocket is not None and current_websocket is not websocket:
+            if not current_connection:
+                return
+            if websocket is not None and current_connection.websocket is not websocket:
+                return
+            if generation is not None and current_connection.generation != generation:
                 return
 
             participant = self.participants.pop(identity, None)
             self.active_connections.pop(identity, None)
+            event_seq = self._next_seq_locked() if participant else self.seq
 
         if participant:
             await self.broadcast(
-                {
-                    "type": "participant_offline",
-                    "identity": participant.identity,
-                    "userId": participant.user_id or participant.identity,
-                    "connectionId": participant.connection_id or participant.identity,
-                    "displayName": participant.display_name,
-                    "from": participant.current_channel,
-                }
+                self._version_payload(
+                    {
+                        "type": "participant_offline",
+                        "identity": participant.identity,
+                        "userId": participant.user_id or participant.identity,
+                        "connectionId": participant.connection_id or participant.identity,
+                        "displayName": participant.display_name,
+                        "from": participant.current_channel,
+                    },
+                    event_seq,
+                )
             )
+
+    async def touch(
+        self,
+        identity: str,
+        websocket: WebSocket,
+        generation: str,
+        now: Optional[float] = None,
+    ) -> bool:
+        """只更新当前 generation；旧 socket 的迟到消息不能续命新连接。"""
+        async with self.lock:
+            connection = self.active_connections.get(identity)
+            if (
+                not connection
+                or connection.websocket is not websocket
+                or connection.generation != generation
+            ):
+                return False
+            connection.last_seen = time.monotonic() if now is None else now
+            return True
+
+    async def cleanup_stale(
+        self,
+        *,
+        now: Optional[float] = None,
+        ttl_seconds: float = PRESENCE_TTL_SECONDS,
+    ) -> List[str]:
+        """移除超过 TTL 的连接，并用 generation 校验防止旧连接删除新连接。"""
+        current_time = time.monotonic() if now is None else now
+        stale = []
+        async with self.lock:
+            for identity, connection in list(self.active_connections.items()):
+                if current_time - connection.last_seen > ttl_seconds:
+                    stale.append((identity, connection.websocket, connection.generation))
+
+        removed = []
+        for identity, websocket, generation in stale:
+            before = self.active_connections.get(identity)
+            await self.disconnect(identity, websocket, generation)
+            after = self.active_connections.get(identity)
+            if before is not None and after is None:
+                removed.append(identity)
+                try:
+                    await websocket.close(code=4001)
+                except Exception:
+                    pass
+
+        if removed:
+            print(f"[presence] TTL 清理幽灵成员: {removed}")
+        return removed
 
     async def move_to_channel(self, identity: str, channel_id: Optional[str]) -> None:
         """把用户移动到指定语音频道。"""
@@ -752,21 +851,27 @@ class PresenceManager:
                 raise ValueError(f"Presence 用户不存在: {identity}")
 
             old_channel = participant.current_channel
+            if old_channel == clean_channel:
+                return
             participant.current_channel = clean_channel
+            event_seq = self._next_seq_locked()
 
-            payload = {
-                "type": "participant_moved",
-                "identity": participant.identity,
-                "userId": participant.user_id or participant.identity,
-                "connectionId": participant.connection_id or participant.identity,
-                "displayName": participant.display_name,
-                "from": old_channel,
-                "to": clean_channel,
-                "avatarColor": participant.avatar_color,
-                "avatarPreset": participant.avatar_preset,
-                "avatarUrl": participant.avatar_url,
-                "statusText": participant.status_text,
-            }
+            payload = self._version_payload(
+                {
+                    "type": "participant_moved",
+                    "identity": participant.identity,
+                    "userId": participant.user_id or participant.identity,
+                    "connectionId": participant.connection_id or participant.identity,
+                    "displayName": participant.display_name,
+                    "from": old_channel,
+                    "to": clean_channel,
+                    "avatarColor": participant.avatar_color,
+                    "avatarPreset": participant.avatar_preset,
+                    "avatarUrl": participant.avatar_url,
+                    "statusText": participant.status_text,
+                },
+                event_seq,
+            )
 
         await self.broadcast(payload)
 
@@ -790,6 +895,7 @@ class PresenceManager:
             participant.avatar_preset = avatar_preset or ""
             participant.avatar_url = avatar_url or ""
             participant.status_text = (status_text or participant.status_text or "在线").strip()[:32] or "在线"
+            event_seq = self._next_seq_locked()
 
         db_upsert_profile(
             participant.user_id or identity,
@@ -802,36 +908,51 @@ class PresenceManager:
         )
 
         await self.broadcast(
-            {
-                "type": "profile_updated",
-                "identity": identity,
-                "userId": participant.user_id or identity,
-                "connectionId": participant.connection_id or identity,
-                "displayName": participant.display_name,
-                "avatarColor": participant.avatar_color,
-                "avatarPreset": participant.avatar_preset,
-                "avatarUrl": participant.avatar_url,
-                "statusText": participant.status_text,
-            },
-            exclude_identity=identity,
+            self._version_payload(
+                {
+                    "type": "profile_updated",
+                    "identity": identity,
+                    "userId": participant.user_id or identity,
+                    "connectionId": participant.connection_id or identity,
+                    "displayName": participant.display_name,
+                    "avatarColor": participant.avatar_color,
+                    "avatarPreset": participant.avatar_preset,
+                    "avatarUrl": participant.avatar_url,
+                    "statusText": participant.status_text,
+                },
+                event_seq,
+            ),
         )
 
     async def broadcast_room_created(self, room_name: str) -> None:
         """频道创建后广播完整快照。"""
-        await self.broadcast(self.build_snapshot())
+        async with self.lock:
+            self._next_seq_locked()
+            snapshot = self.build_snapshot()
+        await self.broadcast(snapshot)
 
-    async def send_to(self, identity: str, payload: dict) -> bool:
+    async def send_to(
+        self,
+        identity: str,
+        payload: dict,
+        websocket: Optional[WebSocket] = None,
+        generation: Optional[str] = None,
+    ) -> bool:
         """向指定用户发送 Presence 消息；失败则清理连接。"""
-        websocket = self.active_connections.get(identity)
-        if not websocket:
+        connection = self.active_connections.get(identity)
+        if not connection:
+            return False
+        if websocket is not None and connection.websocket is not websocket:
+            return False
+        if generation is not None and connection.generation != generation:
             return False
 
         try:
-            await websocket.send_text(json.dumps(payload, ensure_ascii=False))
+            await connection.websocket.send_text(json.dumps(payload, ensure_ascii=False))
             return True
         except Exception as error:
             print(f"[presence] 向客户端发送消息失败，清理连接: identity={identity}, error={error}")
-            await self.disconnect(identity, websocket)
+            await self.disconnect(identity, connection.websocket, connection.generation)
             return False
 
     async def broadcast(self, payload: dict, exclude_identity: Optional[str] = None) -> None:
@@ -843,17 +964,17 @@ class PresenceManager:
         message = json.dumps(payload, ensure_ascii=False)
         dead_connections = []
 
-        for identity, websocket in list(self.active_connections.items()):
+        for identity, connection in list(self.active_connections.items()):
             if exclude_identity and identity == exclude_identity:
                 continue
 
             try:
-                await websocket.send_text(message)
+                await connection.websocket.send_text(message)
             except Exception:
-                dead_connections.append((identity, websocket))
+                dead_connections.append((identity, connection.websocket, connection.generation))
 
-        for identity, websocket in dead_connections:
-            await self.disconnect(identity, websocket)
+        for identity, websocket, generation in dead_connections:
+            await self.disconnect(identity, websocket, generation)
 
 
 @dataclass
@@ -1146,6 +1267,38 @@ class ChatManager:
 
 
 presence_manager = PresenceManager()
+presence_cleanup_task: Optional[asyncio.Task] = None
+
+
+async def _presence_cleanup_loop() -> None:
+    while True:
+        await asyncio.sleep(PRESENCE_CLEANUP_INTERVAL_SECONDS)
+        try:
+            await presence_manager.cleanup_stale()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"[presence] TTL 清理任务异常: {error}")
+
+
+@app.on_event("startup")
+async def start_presence_cleanup_task() -> None:
+    global presence_cleanup_task
+    if presence_cleanup_task is None or presence_cleanup_task.done():
+        presence_cleanup_task = asyncio.create_task(_presence_cleanup_loop())
+
+
+@app.on_event("shutdown")
+async def stop_presence_cleanup_task() -> None:
+    global presence_cleanup_task
+    task = presence_cleanup_task
+    presence_cleanup_task = None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 chat_manager = ChatManager()
 
 
@@ -1663,7 +1816,7 @@ async def presence_websocket(websocket: WebSocket):
     if not identity:
         identity = f"{user}-{uuid.uuid4().hex[:8]}"
 
-    connected = await presence_manager.connect(
+    generation = await presence_manager.connect(
         websocket,
         identity=identity,
         display_name=user,
@@ -1675,12 +1828,16 @@ async def presence_websocket(websocket: WebSocket):
         connection_id=connection_id or identity,
     )
 
-    if not connected:
+    if not generation:
         return
 
     try:
         while True:
             raw_message = await websocket.receive_text()
+
+            # 任何当前连接上的合法入站消息都算活跃；旧 generation 的迟到消息直接退出。
+            if not await presence_manager.touch(identity, websocket, generation):
+                break
 
             try:
                 message = json.loads(raw_message)
@@ -1692,13 +1849,20 @@ async def presence_websocket(websocket: WebSocket):
                         "message": "Presence 消息不是合法 JSON",
                         "raw": raw_message,
                     },
+                    websocket,
+                    generation,
                 )
                 continue
 
             message_type = message.get("type")
 
             if message_type == "ping":
-                await presence_manager.send_to(identity, {"type": "pong"})
+                await presence_manager.send_to(
+                    identity,
+                    {"type": "pong", "serverTime": time.time()},
+                    websocket,
+                    generation,
+                )
 
             elif message_type == "join_channel":
                 channel_id = message.get("channelId")
@@ -1712,13 +1876,20 @@ async def presence_websocket(websocket: WebSocket):
                             "message": str(error),
                             "action": "join_channel",
                         },
+                        websocket,
+                        generation,
                     )
 
             elif message_type == "leave_channel":
                 await presence_manager.move_to_channel(identity, None)
 
             elif message_type == "request_snapshot":
-                await presence_manager.send_to(identity, presence_manager.build_snapshot())
+                await presence_manager.send_to(
+                    identity,
+                    presence_manager.build_snapshot(),
+                    websocket,
+                    generation,
+                )
 
             elif message_type == "update_profile":
                 # 客户端头像信息变更（颜色/emoji/上传头像），广播给其他人
@@ -1736,23 +1907,25 @@ async def presence_websocket(websocket: WebSocket):
                         "type": "error",
                         "message": f"未知 Presence 消息类型: {message_type}",
                     },
+                    websocket,
+                    generation,
                 )
 
     except WebSocketDisconnect:
-        await presence_manager.disconnect(identity, websocket)
+        await presence_manager.disconnect(identity, websocket, generation)
 
     except RuntimeError as error:
         error_text = str(error)
         if "WebSocket is not connected" in error_text:
-            await presence_manager.disconnect(identity, websocket)
+            await presence_manager.disconnect(identity, websocket, generation)
             return
 
         print(f"[presence] WebSocket 运行时异常: identity={identity}, error={error}")
-        await presence_manager.disconnect(identity, websocket)
+        await presence_manager.disconnect(identity, websocket, generation)
 
     except Exception as error:
         print(f"[presence] WebSocket 异常: identity={identity}, error={error}")
-        await presence_manager.disconnect(identity, websocket)
+        await presence_manager.disconnect(identity, websocket, generation)
 
 
 # ============================================================

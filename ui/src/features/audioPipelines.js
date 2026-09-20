@@ -71,23 +71,54 @@ async function waitForWebSocketOpen(socket, wsUrl, label) {
 }
 
 function bindPcmSocketToWorklet(socket, workletNode, label) {
+    let pendingMetadata = null;
     if (workletNode?.port) {
         workletNode.port.onmessage = (event) => {
-            if (event.data?.type === 'pcm_buffer_stats' && event.data.dropped > 0) {
-                console.warn(`[audioPipelines/${label}] 已丢弃过期 PCM 样本，避免旧语音堆积`, event.data);
+            if (event.data?.type !== 'pcm_buffer_stats') return;
+            const stats = event.data;
+            if (stats.droppedFrames > 0 || stats.discontinuityCount > 0) {
+                console.warn(`[audioPipelines/${label}] PCM 缓冲发生有记录的恢复`, stats);
+            } else {
+                console.debug?.(`[audioPipelines/${label}] PCM 缓冲指标`, stats);
             }
         };
     }
 
     socket.onmessage = async (event) => {
         if (!workletNode) return;
+        if (typeof event.data === 'string') {
+            try {
+                const message = JSON.parse(event.data);
+                if (message?.type === 'pcm_frame_meta') {
+                    pendingMetadata = message;
+                    if (message.discontinuity) {
+                        console.warn(`[audioPipelines/${label}] Rust PCM discontinuity`, message);
+                    }
+                }
+            } catch (error) {
+                logError(`audioPipelines/${label} PCM 元数据解析失败`, error, 'warn');
+            }
+            return;
+        }
+
+        const postChunk = (buffer) => {
+            const metadata = pendingMetadata || {};
+            pendingMetadata = null;
+            workletNode.port.postMessage({
+                type: 'pcm_chunk',
+                buffer,
+                seq: metadata.seq,
+                capturedAtMicros: metadata.capturedAtMicros,
+                discontinuity: metadata.discontinuity === true,
+            }, [buffer]);
+        };
         if (event.data instanceof ArrayBuffer) {
-            workletNode.port.postMessage(event.data, [event.data]);
+            postChunk(event.data);
             return;
         }
         if (event.data instanceof Blob) {
             const arr = await event.data.arrayBuffer();
-            workletNode.port.postMessage(arr, [arr]);
+            postChunk(arr);
         }
     };
 
@@ -166,9 +197,11 @@ export function createAudioPipelinesFeature() {
                 numberOfOutputs: 1,
                 outputChannelCount: [1],
                 processorOptions: {
-                    capacityFrames: resolvedSampleRate * 0.2, // Rust 麦克风最多保留 200ms。
-                    targetLatencyFrames: resolvedSampleRate * 0.04, // 延迟堆积时回落到约 40ms。
-                    maxLatencyFrames: resolvedSampleRate * 0.12 // 超过约 120ms 直接丢弃旧语音。
+                    capacityFrames: resolvedSampleRate * 0.5,
+                    targetLatencyFrames: resolvedSampleRate * 0.1,
+                    softLatencyFrames: resolvedSampleRate * 0.18,
+                    maxLatencyFrames: resolvedSampleRate * 0.35,
+                    recoveryLatencyFrames: resolvedSampleRate * 0.18,
                 }
             });
 
@@ -282,7 +315,9 @@ export function createAudioPipelinesFeature() {
                 processorOptions: {
                     capacityFrames: resolvedSampleRate * 0.35, // 应用音频保留少量抗抖动空间。
                     targetLatencyFrames: resolvedSampleRate * 0.08, // 延迟堆积时回落到约 80ms。
-                    maxLatencyFrames: resolvedSampleRate * 0.22 // 超过约 220ms 直接丢弃旧音频。
+                    softLatencyFrames: resolvedSampleRate * 0.16,
+                    maxLatencyFrames: resolvedSampleRate * 0.28,
+                    recoveryLatencyFrames: resolvedSampleRate * 0.16,
                 }
             });
 

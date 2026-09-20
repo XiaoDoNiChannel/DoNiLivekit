@@ -39,12 +39,13 @@ export function createParticipantsFeature(context) {
         }, context.activeSpeakerDebounceMs);
     }
 
-    /** 根据当前 LiveKit 本地/远端成员重新渲染成员列表和音量滑块。 */
+    /** 从与频道列表相同的 LiveKit 派生成员集合渲染高级音量面板。 */
     function updateParticipantList() {
         const room = context.getRoom();
         const listEl = document.getElementById('participant-list');
         if (!listEl) return;
 
+        const members = room ? (context.getAuthoritativeMembers?.() || []) : [];
         if (!room) {
             listEl.innerHTML = '<div style="font-size: 12px; color: #80848e; text-align: center; margin-top: 20px;">加入频道后显示在线人员</div>';
             const userCount = document.getElementById('user-count');
@@ -53,39 +54,32 @@ export function createParticipantsFeature(context) {
         }
 
         const htmlParts = [];
-        let count = 0;
-
-        const renderUser = (p, isSelf) => {
-            count++;
-            const name = p.name || p.identity;
+        const renderUser = (p) => {
+            const isSelf = p.isSelf === true;
+            const name = p.displayName || p.identity;
             const initial = name ? name.charAt(0).toUpperCase() : '?';
             const displayName = isSelf ? `${name} (我)` : name;
             const isSpeaking = activeSpeakerIdentities.has(p.identity);
-
-            const volumes = context.ensureParticipantVolumeState(p.identity);
+            const volumeIdentity = p.volumeIdentity || p.identity;
+            const volumes = context.ensureParticipantVolumeState(volumeIdentity);
 
             let volumeControlsHTML = '';
             if (!isSelf) {
                 const micVol = volumes.mic;
-                volumeControlsHTML += `<div style="display: flex; align-items: center; gap: 5px; font-size: 12px;"><span title="麦克风音量">🎤</span><input type="range" class="volume-slider" min="0" max="300" step="1" value="${context.gainToPercent(micVol)}" oninput="setParticipantVolume('${p.identity}', 'mic', this.value);this.nextElementSibling.innerText=this.value+'%'"><span style="width:38px; text-align:right; color:#b5bac1;">${context.gainToPercent(micVol)}%</span></div>`;
+                volumeControlsHTML += `<div style="display: flex; align-items: center; gap: 5px; font-size: 12px;"><span title="麦克风音量">🎤</span><input type="range" class="volume-slider" min="0" max="300" step="1" value="${context.gainToPercent(micVol)}" oninput="setParticipantVolume('${volumeIdentity}', 'mic', this.value);this.nextElementSibling.innerText=this.value+'%'"><span style="width:38px; text-align:right; color:#b5bac1;">${context.gainToPercent(micVol)}%</span></div>`;
 
-                const hasScreenAudio = Array.from(p.audioTrackPublications.values()).some(pub => pub.source === context.LivekitClient.Track.Source.ScreenShareAudio || pub.source === 'screen_share_audio');
-                if (hasScreenAudio) {
+                if (p.hasScreenAudio) {
                     const screenVol = volumes.screen;
-                    volumeControlsHTML += `<div style="display: flex; align-items: center; gap: 5px; font-size: 12px;"><span title="共享音量">💻</span><input type="range" class="volume-slider" min="0" max="300" step="1" value="${context.gainToPercent(screenVol)}" oninput="setParticipantVolume('${p.identity}', 'screen', this.value);this.nextElementSibling.innerText=this.value+'%'"><span style="width:38px; text-align:right; color:#b5bac1;">${context.gainToPercent(screenVol)}%</span></div>`;
+                    volumeControlsHTML += `<div style="display: flex; align-items: center; gap: 5px; font-size: 12px;"><span title="共享音量">💻</span><input type="range" class="volume-slider" min="0" max="300" step="1" value="${context.gainToPercent(screenVol)}" oninput="setParticipantVolume('${volumeIdentity}', 'screen', this.value);this.nextElementSibling.innerText=this.value+'%'"><span style="width:38px; text-align:right; color:#b5bac1;">${context.gainToPercent(screenVol)}%</span></div>`;
                 }
 
-                const hasAppAudio = Array.from(p.audioTrackPublications.values()).some(pub => {
-                    const pubName = pub?.trackName || pub?.name || '';
-                    return pubName === 'app-audio';
-                });
-                if (hasAppAudio) {
+                if (p.hasAppAudio) {
                     const appAudioVol = volumes.appaudio;
-                    volumeControlsHTML += `<div style="display: flex; align-items: center; gap: 5px; font-size: 12px;"><span title="应用共享音量">🖥️</span><input type="range" class="volume-slider" min="0" max="300" step="1" value="${context.gainToPercent(appAudioVol)}" oninput="setParticipantVolume('${p.identity}', 'appaudio', this.value);this.nextElementSibling.innerText=this.value+'%'"><span style="width:38px; text-align:right; color:#b5bac1;">${context.gainToPercent(appAudioVol)}%</span></div>`;
+                    volumeControlsHTML += `<div style="display: flex; align-items: center; gap: 5px; font-size: 12px;"><span title="应用共享音量">🖥️</span><input type="range" class="volume-slider" min="0" max="300" step="1" value="${context.gainToPercent(appAudioVol)}" oninput="setParticipantVolume('${volumeIdentity}', 'appaudio', this.value);this.nextElementSibling.innerText=this.value+'%'"><span style="width:38px; text-align:right; color:#b5bac1;">${context.gainToPercent(appAudioVol)}%</span></div>`;
                 }
             }
 
-            const isMicMuted = !p.isMicrophoneEnabled;
+            const isMicMuted = !p.micOpen;
             const statusIcon = isMicMuted
                 ? '<span style="color: #f23f42; font-size: 16px;" title="已闭麦">🔇</span>'
                 : '<span style="color: #23a559; font-size: 16px;" title="已开麦">🎙️</span>';
@@ -105,12 +99,11 @@ export function createParticipantsFeature(context) {
             `;
         };
 
-        if (room.localParticipant) htmlParts.push(renderUser(room.localParticipant, true));
-        if (room.remoteParticipants) room.remoteParticipants.forEach(p => htmlParts.push(renderUser(p, false)));
+        members.forEach((member) => htmlParts.push(renderUser(member)));
 
         listEl.innerHTML = htmlParts.join('');
         const userCount = document.getElementById('user-count');
-        if (userCount) userCount.innerText = count;
+        if (userCount) userCount.innerText = String(members.length);
     }
 
     /** 只更新 active-speaker class，不重建整个成员列表。 */

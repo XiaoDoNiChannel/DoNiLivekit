@@ -131,6 +131,28 @@ LiveKit 负责房间连接、音视频轨道发布和订阅。
 
 前端不要在多个地方分散创建 Room。房间连接、切频道和事件绑定应集中在 room/livekit 相关 feature 中。
 
+当前已加入频道的成员集合以 LiveKit `localParticipant + remoteParticipants` 为权威来源；
+Presence 只补充头像、昵称和状态。未加入的其他频道继续使用 Presence 成员快照。
+
+## Presence 有序协议与存活检测
+
+`/ws/presence` 使用服务端启动级 `serverEpoch` 和单调递增 `seq`。快照与所有状态
+增量都携带这两个字段；客户端遇到跳号会请求新快照，epoch 改变会重建同步状态。
+客户端每 12 秒 ping，30 秒未收到 pong 会主动断开并按带随机抖动的指数退避重连。
+
+服务端默认每 5 秒清理一次，45 秒未收到任何入站消息即清除连接。可用环境变量调整：
+
+```text
+DONICHANNEL_PRESENCE_CLEANUP_INTERVAL_SECONDS=5
+DONICHANNEL_PRESENCE_TTL_SECONDS=45
+```
+
+本次未接入 LiveKit webhook：当前仓库没有部署侧 webhook URL/签名配置，强行启用会扩大
+改动并产生不可靠的未验签入口。现有 `join_channel` 仍作为其他频道 Presence 数据的兼容
+来源。后续部署 webhook 时应只接收 `participant_joined`、`participant_left`、
+`participant_connection_aborted`、`room_finished`，并复用同一 epoch/seq 广播路径；同时在
+LiveKit 服务端配置回调 URL、API key/secret，并验证签名。
+
 ## 后续 Discord-like UI 扩展方向
 
 如果后续要改成更接近 Discord 的 UI，推荐新增：
