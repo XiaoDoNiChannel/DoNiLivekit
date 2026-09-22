@@ -1,0 +1,70 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install root Tauri CLI dependencies
+        run: npm ci
+
+      - name: Install frontend dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Verify tag and application versions
+        shell: pwsh
+        run: |
+          $tagVersion = $env:GITHUB_REF_NAME.TrimStart('v')
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoVersion = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $uiVersion = (Get-Content ui/package.json -Raw | ConvertFrom-Json).version
+          $rootVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($tagVersion -ne $tauriVersion -or $tagVersion -ne $cargoVersion -or $tagVersion -ne $uiVersion -or $tagVersion -ne $rootVersion) {
+            throw "Version mismatch: tag=$tagVersion tauri=$tauriVersion cargo=$cargoVersion ui=$uiVersion root=$rootVersion"
+          }
+
+      - name: Read release notes
+        id: release_notes
+        shell: pwsh
+        run: |
+          $delimiter = "NOTES_$([guid]::NewGuid().ToString('N'))"
+          "body<<$delimiter" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Get-Content RELEASE_NOTES.md -Encoding utf8 | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $delimiter | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Build, sign, and upload NSIS release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "DoNiChannel ${{ github.ref_name }}"
+          releaseBody: ${{ steps.release_notes.outputs.body }}
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          updaterJsonPreferNsis: true
+          args: --bundles nsis

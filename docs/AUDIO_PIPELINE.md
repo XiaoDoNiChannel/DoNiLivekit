@@ -34,7 +34,9 @@ Rust WASAPI Process Loopback
 ```text
 src/features/appAudio.js
 src/features/audioPipelines.js
-src-tauri/src/lib.rs
+src-tauri/src/audio/engine.rs
+src-tauri/src/audio/dsp.rs
+src-tauri/src/transport/pcm_websocket.rs
 ```
 
 相关 Rust 命令：
@@ -72,7 +74,9 @@ Windows 麦克风设备
 src/features/rustMic.js
 src/features/audioPipelines.js
 src/features/devices.js
-src-tauri/src/lib.rs
+src-tauri/src/audio/engine.rs
+src-tauri/src/audio/frame.rs
+src-tauri/src/state.rs
 ```
 
 相关 Rust 命令：
@@ -223,3 +227,9 @@ components/settings/       设置界面
 ```
 
 不要把音频新功能直接写进 Vue 组件或 legacy 文件。
+
+## P1 模块边界与不可变参数
+
+P1 只移动实现并增加纯函数测试，没有调整音质参数：麦克风仍固定为 48000 Hz、每帧 480 samples，RNNoise 量纲、VAD 前滚/hangover、默认阈值、默认 5.0 增益、soft-knee limiter 与 24 帧有界队列保持不变。`state.rs` 继续使用 P0 generation/cancellation 隔离旧任务完成事件。
+
+`audio/dsp.rs` 覆盖 Float32 little-endian PCM 转换和 limiter；`audio/frame.rs` 负责过载时优先丢弃旧静音帧并标记 discontinuity。新增音质变化必须另开变更并完成主观/客观回归，不能混入结构重构。

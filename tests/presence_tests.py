@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from main import PresenceManager
+from server.app import PresenceManager
 
 
 class FakeWebSocket:

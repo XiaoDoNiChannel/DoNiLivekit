@@ -188,5 +188,11 @@ uploads/
 *.db-journal
 *.db-wal
 *.db-shm
+*.db.backup-*
+
+# LAN updater payloads are deployment artifacts, never source files.
+downloads/
+release-assets/
+server-release/
 
 /bot/

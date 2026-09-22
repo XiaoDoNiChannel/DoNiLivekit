@@ -227,3 +227,23 @@ Rust 麦克风发布
 聊天发送/接收
 离开房间资源释放
 ```
+
+## Rust、Python 与 Vue 的边界
+
+- Vue 负责交互、LiveKit 房间/轨道和更新状态展示，不自行下载或执行安装包。
+- Rust/Tauri 负责 WASAPI、9001/9002、本机状态、日志和签名 updater。
+- FastAPI 负责 token、房间/聊天/资料、Presence/Chat WebSocket、SQLite 迁移以及局域网更新分发。
+- LiveKit 仍负责实时音视频；禁止把 token、音频帧或大型二进制写入日志。
+
+Rust command 的外部名称和参数是兼容边界。实现代码应放在 `commands/`、`audio/`、`state.rs` 或 `transport/`，`lib.rs` 只做装配。Python 新数据库访问应进入 `server/db/`，新请求体优先使用 `server/models/` 中允许兼容额外字段的 Pydantic 模型。
+
+## Legacy 规则
+
+- `ui/src/legacy/client.js` 和 `ui/pcm-worker.js` 仅保留旧导入/路径兼容，禁止增加业务。
+- 唯一 Worklet 实现在 `ui/public/pcm-worker.js`。
+- 根目录 `old/` 是本机历史归档，不参与构建、不作为真源、禁止继续扩展；删除前需由维护者确认归档价值。
+- 当前组件真源位于 `components/sidebar/`、`components/main/`、`components/modals/` 和 `components/controls/`；未引用的根级重复组件已经清理。
+
+## 数据库变更规则
+
+只允许在 `server/db/migrations.py` 添加单调递增、前向兼容的迁移。迁移不得删除用户表或数据；旧库第一次进入新版本前会生成 `rooms.db.backup-vX-to-vY-时间`。测试必须覆盖临时数据库，禁止把仓库根目录的 `rooms.db` 作为测试目标。

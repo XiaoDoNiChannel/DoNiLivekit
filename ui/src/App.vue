@@ -5,6 +5,7 @@ import MainStage from './components/main/MainStage.vue';
 import AppAudioModal from './components/modals/AppAudioModal.vue';
 import ChatPanel from './components/chat/ChatPanel.vue';
 import AudioSettingsModal from './components/settings/AudioSettingsModal.vue';
+import UpdateNotice from './components/modals/UpdateNotice.vue';
 import {
   initLegacyDom,
   joinRoom,
@@ -69,5 +70,7 @@ onMounted(async () => {
       @close="closeAppAudioModal"
       @confirm="confirmAppAudioSelection"
     />
+
+    <UpdateNotice />
   </div>
 </template>

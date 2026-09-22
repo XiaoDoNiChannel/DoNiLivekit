@@ -12,6 +12,7 @@
   "dependencies": {
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "livekit-client": "^2.22.3",
     "lucide-vue-next": "^0.577.0",
     "tailwind-merge": "^3.6.0",
     "tailwindcss-animate": "^1.0.7",

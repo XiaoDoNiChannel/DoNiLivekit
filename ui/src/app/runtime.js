@@ -1,9 +1,11 @@
 import { invoke, listen, isTauriClient } from '../shared/tauri.js';
+import { LivekitClient } from '../shared/livekit.js';
 import {
     DEFAULT_SERVER_IP,
     AUTO_JOIN_FIRST_CHANNEL_AFTER_LOBBY,
     ACTIVE_SPEAKER_LEVEL_THRESHOLD,
     ACTIVE_SPEAKER_DEBOUNCE_MS,
+    UPDATE_CHECK_INTERVAL_MS,
 } from '../shared/constants.js';
 import { sanitizeText } from '../shared/text.js';
 import { logError } from '../shared/errors.js';
@@ -46,6 +48,8 @@ import { createRustMicFeature } from '../features/rustMic.js';
 import { createRoomConnectionFeature } from '../features/roomConnection.js';
 import { createPresenceClient } from '../features/presenceClient.js';
 import { createChatClient } from '../features/chatClient.js';
+import { createAutoUpdateFeature } from '../features/autoUpdate.js';
+import { patchUpdateState, updateStore } from '../stores/updateStore.js';
 
 // 运行时装配层。
 // 只负责创建 feature、注入依赖、同步 appStore、暴露给 Vue/旧 onclick 的动作。
@@ -63,6 +67,49 @@ const MIC_BOOST_STORAGE_KEY = 'lk_mic_boost';
 const userVolumes = loadUserVolumesFromStorage();
 const audioPipelinesFeature = createAudioPipelinesFeature();
 let roomConnectionFeature;
+const autoUpdateFeature = createAutoUpdateFeature({
+    invoke,
+    isTauriClient,
+    patchState: patchUpdateState,
+    logger: console,
+});
+const LEGACY_DEFAULT_SERVER_IP = '10.126.126.10:5000';
+let autoUpdateTimer = null;
+let updateProgressListenerAttached = false;
+
+function getConfiguredUpdateServerAddress() {
+    const saved = String(localStorage.getItem('lk_server_ip') || '').trim();
+    if (!saved || saved === LEGACY_DEFAULT_SERVER_IP) return DEFAULT_SERVER_IP;
+    return saved;
+}
+
+async function checkForUpdates(serverAddress = '') {
+    const address = serverAddress || getConfiguredUpdateServerAddress();
+    return autoUpdateFeature.checkSilently(address);
+}
+
+async function installAvailableUpdate() {
+    return autoUpdateFeature.installAvailable();
+}
+
+function startAutoUpdateChecks() {
+    if (!isTauriClient) return;
+
+    if (!updateProgressListenerAttached) {
+        updateProgressListenerAttached = true;
+        autoUpdateFeature.attachProgressListener(listen).catch((error) => {
+            updateProgressListenerAttached = false;
+            logError('runtime/startAutoUpdateChecks 注册更新进度监听失败', error, 'warn');
+        });
+    }
+
+    void checkForUpdates();
+    if (!autoUpdateTimer) {
+        autoUpdateTimer = window.setInterval(() => {
+            void checkForUpdates();
+        }, UPDATE_CHECK_INTERVAL_MS);
+    }
+}
 
 const presenceClient = createPresenceClient({
     logError,
@@ -916,6 +963,9 @@ function joinRoom(options) {
     syncProfileToServer({ silent: true });
     return afterAction(
         Promise.resolve(roomConnectionFeature.joinRoom(options)).then(async (result) => {
+            // The first successful connection also establishes a valid runtime update source.
+            // Detached by design: update availability must never delay lobby entry.
+            void checkForUpdates(getCurrentApiBase());
             await ensureChatSocketConnected().catch((error) => {
                 logError('runtime/joinRoom 连接 Chat WebSocket 失败', error, 'warn');
             });
@@ -1021,8 +1071,19 @@ function initLegacyDomBlock1() {
     const savedUser = localStorage.getItem('lk_username');
     if (savedUser) document.getElementById('username').value = savedUser;
 
-    const savedServerIp = localStorage.getItem('lk_server_ip');
-    document.getElementById('server-ip').value = savedServerIp || DEFAULT_SERVER_IP;
+    const savedServerIp = String(localStorage.getItem('lk_server_ip') || '').trim();
+    const effectiveServerIp = (!savedServerIp || savedServerIp === LEGACY_DEFAULT_SERVER_IP)
+        ? DEFAULT_SERVER_IP
+        : savedServerIp;
+    document.getElementById('server-ip').value = effectiveServerIp;
+
+    // 把旧默认中心服务器地址迁移到当前地址；用户手动填写的其他服务器不受影响。
+    if (savedServerIp === LEGACY_DEFAULT_SERVER_IP) {
+        localStorage.setItem('lk_server_ip', DEFAULT_SERVER_IP);
+    }
+
+    // 启动检查不阻塞 UI；此后每四小时再静默检查一次。
+    startAutoUpdateChecks();
 
     renderChannelList();
     updateMicList().catch((error) => logError('runtime/initLegacyDom 初始化麦克风列表失败', error, 'warn'));
@@ -1146,6 +1207,9 @@ Object.assign(window, {
     __appStore: appStore,
     __presenceClient: presenceClient,
     __chatClient: chatClient,
+    __updateStore: updateStore,
+    checkForUpdates,
+    installAvailableUpdate,
     __syncAppStore: syncAppStore,
     __syncPresenceChannel: syncPresenceChannel,
     __schedulePresenceChannelSync: schedulePresenceChannelSync,
@@ -1177,4 +1241,6 @@ export {
     closeAppAudioModal,
     confirmAppAudioSelection,
     sendChatMessage,
+    checkForUpdates,
+    installAvailableUpdate,
 };

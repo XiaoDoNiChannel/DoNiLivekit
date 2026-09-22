@@ -193,8 +193,24 @@ export function createRoomConnectionFeature(context) {
         context.ensureAudioContext();
         await context.audioPipelines.resumeLocalPcmAudioContext();
 
-        localStorage.setItem('lk_username', username);
         const serverConfig = getServerConfig();
+
+        // Do not enter the lobby using the built-in fallback channel list when the
+        // backend is unreachable.  Besides being misleading to users, that made an
+        // old/cached server address look like a successful connection.
+        try {
+            await refreshRoomsFromServer();
+        } catch (error) {
+            logError('roomConnection/joinRoom 后端连通性检查失败', error);
+            alertError(
+                '连接服务器失败',
+                error,
+                `无法访问 ${serverConfig.apiBase}，请检查服务器地址、端口和网络连接。`,
+            );
+            return false;
+        }
+
+        localStorage.setItem('lk_username', username);
         localStorage.setItem('lk_server_ip', serverConfig.persistValue);
 
         isInLobby = true;
@@ -226,6 +242,8 @@ export function createRoomConnectionFeature(context) {
                 await switchChannel(targetChannel);
             }
         }
+
+        return true;
     }
 
     /** 切换频道：按固定顺序停止本地发布、disconnect、connect，再恢复原来的麦克风状态。 */

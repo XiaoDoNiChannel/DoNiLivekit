@@ -196,3 +196,36 @@ legacy 只做兼容
 ```
 
 只要后续开发遵守这个边界，项目就不容易重新变成大文件堆叠结构。
+
+## P1 后端与桌面模块
+
+```text
+Vue/Vite
+├─ stores：Presence、Chat、Update 等可序列化状态
+├─ features：连接、音频、自动更新业务动作
+└─ shared/livekit.js：npm LiveKit SDK 统一适配入口
+
+Tauri/Rust
+├─ lib.rs：Builder / plugin / state / command 注册
+├─ state.rs：generation/cancellation 会话模型
+├─ commands：设备、麦克风、进程音频、updater
+├─ audio：WASAPI engine、DSP 纯函数、有界 frame queue
+└─ transport：9001/9002 本地地址
+
+FastAPI
+├─ main.py：兼容启动入口
+├─ server/app.py：应用和现有协议路由
+├─ server/config.py：环境配置与路径
+├─ server/lifespan.py：迁移、后台任务和关闭
+├─ server/db：迁移与 rooms/chat/profiles 仓储
+├─ server/realtime：Presence/Chat 共用 JSON、心跳和发送基础层
+└─ server/api/updates.py：签名更新清单与下载
+```
+
+同步 SQLite 操作仍是短事务，并设置 `busy_timeout`。路由内不再包含 rooms/chat/profiles 的核心 SQL；如果未来出现可测量的事件循环阻塞，再对仓储调用统一使用线程封装，不在没有数据的情况下引入额外常驻服务。
+
+## 启动与资源生命周期
+
+FastAPI lifespan 在服务开始时执行数据库迁移并启动 Presence TTL 清理任务，在关闭时取消并等待任务。模块导入不会触碰真实数据库，因此单元测试可安全替换 `DB_PATH` 后再启动应用。
+
+动态更新链路见 `UPDATE_SYSTEM.md`，发布链路见 `RELEASE_PROCESS.md`。

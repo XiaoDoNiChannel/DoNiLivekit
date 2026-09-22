@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Install frontend dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Build Vue/Vite production bundle
+        working-directory: ui
+        run: npm run build
+
+      - name: Test frontend stores and protocols
+        working-directory: ui
+        run: npm test
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Check Python syntax
+        run: python -m compileall -q main.py server tests
+
+      - name: Run Python unit tests
+        run: python -m unittest discover -s tests -p "*_tests.py" -v
+
+      - name: Check Rust formatting
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Check Rust
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      - name: Test Rust
+        working-directory: src-tauri
+        run: cargo test --locked

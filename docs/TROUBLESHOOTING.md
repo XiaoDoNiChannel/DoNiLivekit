@@ -171,6 +171,35 @@ AudioContext.setSinkId 切换失败
 2. 是否选择了正确进程
 3. Rust 9001 是否连接成功
 4. start_capture/start_capture_multi 是否返回采样率
+
+## 自动更新始终显示 unavailable
+
+静默更新只有在以下条件同时满足时才执行：运行于 Tauri、已经保存服务器地址、FastAPI 可访问。依次检查：
+
+```text
+GET http://服务器:5000/api/update/windows/x86_64/当前版本
+服务端 downloads/latest.json 是否存在
+latest.json 引用的 NSIS updater bundle 是否也位于 downloads/
+signature 是否由与 tauri.conf.json 公钥匹配的私钥生成
+```
+
+没有更新应返回 204，这是正常行为。网络不可达或旧服务器没有接口时，客户端记录 `autoUpdate/check` 调试日志并继续进入主界面。
+
+局域网 HTTP 仅通过 updater 的 `dangerousInsecureTransportProtocol` 支持；签名校验仍然强制启用。不要通过删除公钥或自行 fetch/执行安装包来“修复”更新。
+
+## 数据库迁移或启动失败
+
+查看 `donichannel.db.migrations` 日志。迁移前备份文件格式为：
+
+```text
+rooms.db.backup-v0-to-v3-YYYYMMDD-HHMMSS
+```
+
+关闭服务后，可保留故障库并复制备份到新的测试目录验证。不要在服务运行时覆盖 `rooms.db`，也不要删除唯一备份。
+
+## 诊断信息收集
+
+当前无需复杂 UI：一次诊断包应包含 Tauri 日志、FastAPI 控制台日志、浏览器控制台中带模块名前缀的错误、应用版本、Windows 版本、服务器地址（不含 token）以及 9001/9002/5000/7880 端口状态。严禁收集完整 LiveKit token、音频帧、聊天图片二进制或 updater 私钥。日志写入失败不应阻止应用运行。
 5. AudioWorklet 是否初始化成功
 6. LiveKit 是否 publishTrack(name='app-audio') 成功
 7. 远端是否订阅到 app-audio track
