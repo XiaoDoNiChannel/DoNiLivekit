@@ -56,15 +56,15 @@ class PresenceManagerTests(unittest.IsolatedAsyncioTestCase):
         observer = FakeWebSocket()
         await manager.connect(observer, "observer", "观察者")
         ghost = FakeWebSocket()
-        await manager.connect(ghost, "ghost", "幽灵")
-        await manager.move_to_channel("ghost", "day0")
+        await manager.connect(ghost, "幽灵", "幽灵")
+        await manager.move_to_channel("幽灵", "day0")
         manager.active_connections["observer"].last_seen = 100.0
-        manager.active_connections["ghost"].last_seen = 0.0
+        manager.active_connections["幽灵"].last_seen = 0.0
 
         removed = await manager.cleanup_stale(now=20.0, ttl_seconds=10.0)
 
-        self.assertEqual(removed, ["ghost"])
-        self.assertNotIn("ghost", manager.participants)
+        self.assertEqual(removed, ["幽灵"])
+        self.assertNotIn("幽灵", manager.participants)
         offline = [item for item in observer.messages if item.get("type") == "participant_offline"][-1]
         self.assertEqual(offline["serverEpoch"], "test-epoch")
         self.assertIsInstance(offline["seq"], int)

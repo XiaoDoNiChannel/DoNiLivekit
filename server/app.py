@@ -400,7 +400,11 @@ class PresenceManager:
         try:
             await websocket.accept()
         except Exception as error:
-            print(f"[presence] WebSocket accept 失败: identity={identity}, error={error}")
+            LOGGER.warning(
+                "action=presence_accept_failed identity=%s error=%s",
+                ascii(identity),
+                ascii(str(error)),
+            )
             return None
 
         old_connection = None
@@ -445,9 +449,10 @@ class PresenceManager:
         try:
             await send_payload(websocket, snapshot)
         except Exception as error:
-            print(
-                f"[presence] 发送初始快照失败，按正常断开处理: "
-                f"identity={identity}, error={error}"
+            LOGGER.warning(
+                "action=presence_initial_snapshot_failed identity=%s error=%s",
+                ascii(identity),
+                ascii(str(error)),
             )
             await self.disconnect(identity, websocket, generation)
             return None
@@ -562,7 +567,10 @@ class PresenceManager:
                     pass
 
         if removed:
-            print(f"[presence] TTL 清理幽灵成员: {removed}")
+            LOGGER.info(
+                "action=presence_ttl_cleanup removed=%s",
+                json.dumps(removed, ensure_ascii=True),
+            )
         return removed
 
     async def move_to_channel(self, identity: str, channel_id: Optional[str]) -> None:
@@ -678,7 +686,11 @@ class PresenceManager:
             await send_payload(connection.websocket, payload)
             return True
         except Exception as error:
-            print(f"[presence] 向客户端发送消息失败，清理连接: identity={identity}, error={error}")
+            LOGGER.warning(
+                "action=presence_send_failed identity=%s error=%s",
+                ascii(identity),
+                ascii(str(error)),
+            )
             await self.disconnect(identity, connection.websocket, connection.generation)
             return False
 
@@ -747,7 +759,11 @@ class ChatManager:
         try:
             await websocket.accept()
         except Exception as error:
-            print(f"[chat] WebSocket accept 失败: connectionId={connection_id}, error={error}")
+            LOGGER.warning(
+                "action=chat_accept_failed connection_id=%s error=%s",
+                ascii(connection_id),
+                ascii(str(error)),
+            )
             return False
 
         old_websocket = None
@@ -788,7 +804,12 @@ class ChatManager:
             },
             websocket=websocket,
         )
-        print(f"[chat] connected userId={user_id} connectionId={connection_id} identity={identity}")
+        LOGGER.info(
+            "action=chat_connected user_id=%s connection_id=%s identity=%s",
+            ascii(user_id),
+            ascii(connection_id),
+            ascii(identity),
+        )
         return True
 
     async def disconnect(self, connection_id: str, websocket: Optional[WebSocket] = None) -> None:
@@ -799,7 +820,12 @@ class ChatManager:
             conn = self.active_connections.pop(connection_id, None)
 
         if conn:
-            print(f"[chat] disconnected userId={conn.user_id} connectionId={connection_id} channel={conn.current_channel}")
+            LOGGER.info(
+                "action=chat_disconnected user_id=%s connection_id=%s channel=%s",
+                ascii(conn.user_id),
+                ascii(connection_id),
+                ascii(conn.current_channel),
+            )
 
     async def send_to_connection(self, connection_id: str, payload: dict, websocket: Optional[WebSocket] = None) -> bool:
         conn = self.active_connections.get(connection_id)
@@ -811,7 +837,11 @@ class ChatManager:
             await send_payload(target_ws, payload)
             return True
         except Exception as error:
-            print(f"[chat] 发送消息失败，清理连接: connectionId={connection_id}, error={error}")
+            LOGGER.warning(
+                "action=chat_send_failed connection_id=%s error=%s",
+                ascii(connection_id),
+                ascii(str(error)),
+            )
             await self.disconnect(connection_id, target_ws)
             return False
 
@@ -834,7 +864,11 @@ class ChatManager:
                 "channelId": clean_channel,
             },
         )
-        print(f"[chat] subscribed connectionId={connection_id} channel={clean_channel}")
+        LOGGER.info(
+            "action=chat_subscribed connection_id=%s channel=%s",
+            ascii(connection_id),
+            ascii(clean_channel),
+        )
 
     async def handle_send_message(self, connection_id: str, body: dict) -> None:
         """处理 Chat WebSocket 发送消息：保存 SQLite、ACK、按频道广播。"""
@@ -904,7 +938,13 @@ class ChatManager:
 
         # Phase 3：聊天消息只走 Chat WebSocket，不再通过 Presence 广播。
 
-        print(f"[chat] message_created channel={channel_id} id={message_id} from={conn.user_id} online={self.get_connection_count()}")
+        LOGGER.info(
+            "action=chat_message_created channel=%s message_id=%s user_id=%s online=%s",
+            ascii(channel_id),
+            ascii(message_id),
+            ascii(conn.user_id),
+            self.get_connection_count(),
+        )
 
     async def handle_toggle_reaction(self, connection_id: str, body: dict) -> None:
         """处理 Chat WebSocket Reaction/Pin：更新 SQLite、ACK、按频道广播。"""
@@ -969,7 +1009,14 @@ class ChatManager:
 
         # Phase 3：Reaction 只走 Chat WebSocket，不再通过 Presence 广播。
 
-        print(f"[chat] reaction_updated channel={channel_id} message={message_id} emoji={emoji} action={action} from={conn.user_id}")
+        LOGGER.info(
+            "action=chat_reaction_updated channel=%s message_id=%s emoji=%s reaction_action=%s user_id=%s",
+            ascii(channel_id),
+            ascii(message_id),
+            ascii(emoji),
+            ascii(action),
+            ascii(conn.user_id),
+        )
 
     async def broadcast_to_channel(self, channel_id: str, payload: dict, exclude_connection_id: Optional[str] = None) -> None:
         """Phase 2 使用：只向订阅指定频道的 Chat 客户端广播。"""
@@ -1005,7 +1052,9 @@ async def _presence_cleanup_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            print(f"[presence] TTL 清理任务异常: {error}")
+            LOGGER.warning(
+                "action=presence_cleanup_failed error=%s", ascii(str(error))
+            )
 
 
 async def start_presence_cleanup_task() -> None:
@@ -1066,7 +1115,7 @@ async def get_rooms():
     try:
         livekit_map = await list_livekit_rooms_and_participants()
     except Exception as error:
-        print(f"[rooms] LiveKit room sync failed: {error}")
+        LOGGER.warning("action=livekit_room_sync_failed error=%s", ascii(str(error)))
 
     merged_names = []
     seen = set()
@@ -1647,11 +1696,19 @@ async def presence_websocket(websocket: WebSocket):
             await presence_manager.disconnect(identity, websocket, generation)
             return
 
-        print(f"[presence] WebSocket 运行时异常: identity={identity}, error={error}")
+        LOGGER.warning(
+            "action=presence_websocket_runtime_error identity=%s error=%s",
+            ascii(identity),
+            ascii(str(error)),
+        )
         await presence_manager.disconnect(identity, websocket, generation)
 
     except Exception as error:
-        print(f"[presence] WebSocket 异常: identity={identity}, error={error}")
+        LOGGER.warning(
+            "action=presence_websocket_error identity=%s error=%s",
+            ascii(identity),
+            ascii(str(error)),
+        )
         await presence_manager.disconnect(identity, websocket, generation)
 
 
@@ -1807,11 +1864,19 @@ async def chat_websocket(websocket: WebSocket):
         if "WebSocket is not connected" in error_text:
             await chat_manager.disconnect(connection_id, websocket)
             return
-        print(f"[chat] WebSocket 运行时异常: connectionId={connection_id}, error={error}")
+        LOGGER.warning(
+            "action=chat_websocket_runtime_error connection_id=%s error=%s",
+            ascii(connection_id),
+            ascii(str(error)),
+        )
         await chat_manager.disconnect(connection_id, websocket)
 
     except Exception as error:
-        print(f"[chat] WebSocket 异常: connectionId={connection_id}, error={error}")
+        LOGGER.warning(
+            "action=chat_websocket_error connection_id=%s error=%s",
+            ascii(connection_id),
+            ascii(str(error)),
+        )
         await chat_manager.disconnect(connection_id, websocket)
 
 
