@@ -1,10 +1,17 @@
 ﻿$ErrorActionPreference = "Stop"
+$MaxLogSizeMB = if ($env:DONICHANNEL_LOG_MAX_MB -match '^\d+$' -and [int]$env:DONICHANNEL_LOG_MAX_MB -ge 1) {
+    [Math]::Min([int]$env:DONICHANNEL_LOG_MAX_MB, 1024)
+} else { 10 }
+$MaxLogFiles = if ($env:DONICHANNEL_LOG_FILE_COUNT -match '^\d+$' -and [int]$env:DONICHANNEL_LOG_FILE_COUNT -ge 1) {
+    [Math]::Min([int]$env:DONICHANNEL_LOG_FILE_COUNT, 20)
+} else { 5 }
 $serverRoot = $PSScriptRoot
 $logsDir = Join-Path $serverRoot "logs"
 $uploadsDir = Join-Path $serverRoot "uploads"
 $downloadsDir = Join-Path $serverRoot "downloads"
 $livekitExe = Join-Path $serverRoot "livekit-server.exe"
 $backendExe = Join-Path $serverRoot "donichannel-backend.exe"
+$runnerScript = Join-Path $serverRoot "Run-CenterService.ps1"
 
 New-Item -ItemType Directory -Path $logsDir, $uploadsDir, $downloadsDir -Force | Out-Null
 
@@ -13,6 +20,9 @@ if (-not (Test-Path -LiteralPath $livekitExe -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $backendExe -PathType Leaf)) {
     throw "缺少 donichannel-backend.exe"
+}
+if (-not (Test-Path -LiteralPath $runnerScript -PathType Leaf)) {
+    throw "缺少 Run-CenterService.ps1"
 }
 
 function Get-RunningPackagedProcess {
@@ -52,21 +62,6 @@ $backendPidFile = Join-Path $serverRoot "backend.pid"
 $livekitProcess = Get-RunningPackagedProcess -PidFile $livekitPidFile -ExpectedPath $livekitExe
 $backendProcess = Get-RunningPackagedProcess -PidFile $backendPidFile -ExpectedPath $backendExe
 
-if (-not $livekitProcess) {
-    $livekitProcess = Start-Process `
-        -FilePath $livekitExe `
-        -ArgumentList @("--dev", "--bind", "0.0.0.0", "--node-ip", "10.126.126.67") `
-        -WorkingDirectory $serverRoot `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput (Join-Path $logsDir "livekit.stdout.log") `
-        -RedirectStandardError (Join-Path $logsDir "livekit.stderr.log") `
-        -PassThru
-    Set-Content -LiteralPath $livekitPidFile -Value $livekitProcess.Id -Encoding ascii
-    Write-Host "LiveKit 已启动，PID=$($livekitProcess.Id)" -ForegroundColor Green
-} else {
-    Write-Host "LiveKit 已在运行，PID=$($livekitProcess.Id)" -ForegroundColor Yellow
-}
-
 $env:DONICHANNEL_BASE_DIR = $serverRoot
 $env:DONICHANNEL_DB_PATH = Join-Path $serverRoot "rooms.db"
 $env:DONICHANNEL_UPLOADS_DIR = $uploadsDir
@@ -75,16 +70,30 @@ $env:LIVEKIT_API_KEY = "devkey"
 $env:LIVEKIT_API_SECRET = "secret"
 $env:LIVEKIT_URL = "http://127.0.0.1:7880"
 
-if (-not $backendProcess) {
-    $backendProcess = Start-Process `
-        -FilePath $backendExe `
+function Start-VisibleServiceConsole {
+    param([ValidateSet("LiveKit", "Backend")][string]$Service)
+
+    $serviceKey = $Service.ToLowerInvariant()
+    Remove-Item -LiteralPath (Join-Path $serverRoot "$serviceKey.stop") -Force -ErrorAction SilentlyContinue
+    $argumentLine = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$runnerScript`" -Service $Service -MaxLogSizeMB $MaxLogSizeMB -MaxLogFiles $MaxLogFiles"
+    return Start-Process `
+        -FilePath "powershell.exe" `
+        -ArgumentList $argumentLine `
         -WorkingDirectory $serverRoot `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput (Join-Path $logsDir "backend.stdout.log") `
-        -RedirectStandardError (Join-Path $logsDir "backend.stderr.log") `
+        -WindowStyle Normal `
         -PassThru
-    Set-Content -LiteralPath $backendPidFile -Value $backendProcess.Id -Encoding ascii
-    Write-Host "Python 后端已启动，PID=$($backendProcess.Id)" -ForegroundColor Green
+}
+
+if (-not $livekitProcess) {
+    $livekitConsole = Start-VisibleServiceConsole -Service "LiveKit"
+    Write-Host "LiveKit 控制台已打开，窗口 PID=$($livekitConsole.Id)" -ForegroundColor Green
+} else {
+    Write-Host "LiveKit 已在运行，PID=$($livekitProcess.Id)" -ForegroundColor Yellow
+}
+
+if (-not $backendProcess) {
+    $backendConsole = Start-VisibleServiceConsole -Service "Backend"
+    Write-Host "Python 后端控制台已打开，窗口 PID=$($backendConsole.Id)" -ForegroundColor Green
 } else {
     Write-Host "Python 后端已在运行，PID=$($backendProcess.Id)" -ForegroundColor Yellow
 }
@@ -92,7 +101,7 @@ if (-not $backendProcess) {
 function Wait-LocalPort {
     param(
         [int]$Port,
-        [int]$TimeoutSeconds = 25
+        [int]$TimeoutSeconds = 90
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -118,7 +127,23 @@ $backendReady = Wait-LocalPort -Port 5000
 if (-not $livekitReady -or -not $backendReady) {
     Write-Host "服务启动超时，请检查 logs 目录。" -ForegroundColor Red
     & (Join-Path $serverRoot "Stop-CenterServer.ps1")
+    foreach ($logName in @("livekit.log", "backend.log")) {
+        $logPath = Join-Path $logsDir $logName
+        if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+            Write-Host "`n--- $logName 最后 30 行 ---" -ForegroundColor Yellow
+            Get-Content -LiteralPath $logPath -Tail 30
+        }
+    }
     exit 1
+}
+
+$livekitProcess = Get-RunningPackagedProcess -PidFile $livekitPidFile -ExpectedPath $livekitExe
+$backendProcess = Get-RunningPackagedProcess -PidFile $backendPidFile -ExpectedPath $backendExe
+if ($livekitProcess) {
+    Set-Content -LiteralPath $livekitPidFile -Value $livekitProcess.Id -Encoding ascii
+}
+if ($backendProcess) {
+    Set-Content -LiteralPath $backendPidFile -Value $backendProcess.Id -Encoding ascii
 }
 
 Write-Host ""
@@ -126,3 +151,4 @@ Write-Host "中心服务器已启动" -ForegroundColor Green
 Write-Host "FastAPI: http://10.126.126.67:5000"
 Write-Host "LiveKit: ws://10.126.126.67:7880"
 Write-Host "日志目录: $logsDir"
+Write-Host "日志限制: 每个文件 ${MaxLogSizeMB}MB，每个服务最多 $MaxLogFiles 份"

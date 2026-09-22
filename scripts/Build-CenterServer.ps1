@@ -106,6 +106,9 @@ LiveKit：  ws://10.126.126.67:7880
 2. 双击 OPEN_FIREWALL.cmd，以管理员身份放行 5000/7880/7881/TCP 和 7882/UDP。
 3. 双击 START_SERVER.cmd。
 
+启动后会看到三个窗口：启动器、LiveKit、Python 后端。两个服务窗口会实时显示运行输出；
+关闭服务请使用 STOP_SERVER.cmd，不要直接关闭服务窗口。
+
 停止服务：双击 STOP_SERVER.cmd。
 
 发布客户端更新：双击 PUBLISH_CLIENT_UPDATE.cmd，然后输入包含 latest.json 和 .nsis.zip 的目录。
@@ -120,7 +123,8 @@ LiveKit：  ws://10.126.126.67:7880
 - rooms.db：房间、聊天、用户资料数据库。
 - uploads：用户上传文件。
 - downloads：客户端自动更新包。
-- logs：LiveKit 与 Python 后端日志。
+- logs：LiveKit 与 Python 后端轮转日志。默认每个日志文件最大 10 MB，每个服务最多保留 5 份。
+  如需调整，编辑 START_SERVER.cmd 顶部的 DONICHANNEL_LOG_MAX_MB 和 DONICHANNEL_LOG_FILE_COUNT。
 
 这个压缩包不需要服务器安装 Python、Node.js 或 Rust。
 "@

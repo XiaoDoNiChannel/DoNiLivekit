@@ -57,6 +57,12 @@ server-release/DoNiChannel-Server-v版本.zip
 3. 停止时运行 `STOP_SERVER.cmd`。
 4. 发布客户端更新时运行 `PUBLISH_CLIENT_UPDATE.cmd`。
 
+`START_SERVER.cmd` 会分别打开 LiveKit 和 Python 后端的可见控制台。控制台输出同时写入
+`logs/livekit.log` 和 `logs/backend.log`。默认单个日志最大 10 MB，每个服务最多保留 5 份。
+如需调整，修改 `START_SERVER.cmd` 顶部的 `DONICHANNEL_LOG_MAX_MB` 和
+`DONICHANNEL_LOG_FILE_COUNT`。
+关闭服务请始终使用 `STOP_SERVER.cmd`。
+
 升级中心服务器时，先停止旧服务，覆盖程序文件，但必须保留：
 
 ```text
