@@ -1,7 +1,11 @@
+import importlib
 import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from server.app import PresenceManager
+backend = importlib.import_module("server.app")
 
 
 class FakeWebSocket:
@@ -22,8 +26,19 @@ class FakeWebSocket:
 
 
 class PresenceManagerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp_directory = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_directory.name) / "rooms.db"
+        self.db_patch = patch.object(backend, "DB_PATH", self.db_path)
+        self.db_patch.start()
+        backend.init_db()
+
+    def tearDown(self):
+        self.db_patch.stop()
+        self.temp_directory.cleanup()
+
     async def test_old_connection_disconnect_does_not_remove_new_generation(self):
-        manager = PresenceManager(server_epoch="test-epoch")
+        manager = backend.PresenceManager(server_epoch="test-epoch")
         old_socket = FakeWebSocket()
         old_generation = await manager.connect(old_socket, "same-user", "旧连接")
         await manager.move_to_channel("same-user", "day0")
@@ -37,7 +52,7 @@ class PresenceManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.participants["same-user"].current_channel, "day0")
 
     async def test_ttl_cleanup_removes_ghost_member_and_emits_versioned_offline(self):
-        manager = PresenceManager(server_epoch="test-epoch")
+        manager = backend.PresenceManager(server_epoch="test-epoch")
         observer = FakeWebSocket()
         await manager.connect(observer, "observer", "观察者")
         ghost = FakeWebSocket()
@@ -55,7 +70,7 @@ class PresenceManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(offline["seq"], int)
 
     async def test_snapshot_and_diffs_have_monotonic_version(self):
-        manager = PresenceManager(server_epoch="test-epoch")
+        manager = backend.PresenceManager(server_epoch="test-epoch")
         first = FakeWebSocket()
         await manager.connect(first, "one", "一号")
         initial_seq = first.messages[0]["seq"]
