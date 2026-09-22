@@ -381,7 +381,8 @@ export function markMessageSent({ clientMessageId, serverMessageId, messageId })
 
 export function markMessageFailed(clientMessageId) {
   const found = findMessageAnywhere(clientMessageId);
-  if (!found) return;
+  // 历史补偿或迟到的广播可能已经确认送达，超时不能回退该状态。
+  if (!found || found.msg.status === 'sent') return;
   found.msg.status = 'failed';
   persistChannel(found.channelId);
 }

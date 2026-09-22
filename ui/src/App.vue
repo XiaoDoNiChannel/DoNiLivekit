@@ -57,7 +57,10 @@ onMounted(async () => {
 
     <MainStage />
 
-    <ChatPanel @send="(text) => sendChatMessage(text)" />
+    <ChatPanel
+      @send="(text) => sendChatMessage(text)"
+      @retry="(clientMessageId) => sendChatMessage('', clientMessageId)"
+    />
 
     <AudioSettingsModal
       :open="isSettingsOpen"

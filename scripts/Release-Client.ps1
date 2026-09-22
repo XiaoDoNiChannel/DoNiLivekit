@@ -176,7 +176,7 @@ try {
     Invoke-CheckedCommand "推送发布标签" { git push origin "v$Version" }
 
     Write-Host "`n客户端 v$Version 已触发 GitHub Actions 构建。" -ForegroundColor Green
-    Write-Host "构建完成后下载 Draft Release 的 latest.json、.nsis.zip、.sig 和 .exe，复制到中心服务器再运行 Publish-LanUpdate.ps1。"
+    Write-Host "构建完成后下载 Draft Release 的 latest.json、更新安装包和对应 .sig，复制到中心服务器再运行 Publish-LanUpdate.ps1。"
 } finally {
     Pop-Location
 }

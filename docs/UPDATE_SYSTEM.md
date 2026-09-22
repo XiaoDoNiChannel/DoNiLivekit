@@ -17,6 +17,8 @@ DoNiChannel 默认从用户已经保存或正在使用的 FastAPI 服务器检�
 4. 启动、成功连接以及客户端持续运行期间每四小时检查一次。检查结果进入 `updateStore`；网络不可达、超时或接口不存在时状态为 `unavailable`，不弹阻断提示。
 5. 有更新时右下角显示版本、更新说明和安装按钮。用户确认后调用 `install_update`；Rust 再次检查并由 Tauri updater 下载、上报进度、验证签名和安装，Windows 安装完成后自动重启。Vue 不接触安装包 URL。
 
+`0.1.1` 是第一版包含上述自动更新链路的客户端。已经安装的 `0.1.0` 不具备检查命令和更新提示，必须手动安装 `0.1.1` 一次；从下一版本开始才能通过客户端内自动更新。
+
 ## 服务端流程
 
 FastAPI 从 `DONICHANNEL_DOWNLOADS_DIR`（默认仓库/部署目录下的 `downloads/`）读取 `latest.json`：
@@ -25,7 +27,7 @@ FastAPI 从 `DONICHANNEL_DOWNLOADS_DIR`（默认仓库/部署目录下的 `downl
 - `GET /downloads/{filename}`：同一服务器提供签名 updater bundle。
 - 设置 `DONICHANNEL_UPDATE_BASE_URL=https://国内对象存储/路径` 后，清单 URL 会指向该备用源；不设置时指向请求当前 FastAPI 的地址。
 
-部署一个版本时，把 GitHub Release 中的 `latest.json`、Windows NSIS updater bundle（通常为 `.nsis.zip`）和对应签名相关产物复制到服务端 `downloads/`。清单中的原 GitHub URL 只用于识别文件名，服务端响应会改写为局域网或配置的 CDN URL。
+部署一个版本时，把 GitHub Release 中的 `latest.json`、Windows 更新安装包（`.exe`、`.msi` 或 `.nsis.zip`）和对应 `.sig` 交给 `Publish-LanUpdate.ps1`。脚本会兼容 `tauri-action v1` 的数字 GitHub asset URL，将清单规范化为真实文件名，再按“安装包优先、清单最后”的顺序发布到服务端 `downloads/`。
 
 也可以在中心服务器仓库根目录运行发布脚本。脚本会验证清单和签名字段，先复制更新包、最后原子替换清单，并检查线上接口：
 

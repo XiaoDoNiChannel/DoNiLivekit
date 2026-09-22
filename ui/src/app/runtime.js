@@ -149,6 +149,11 @@ const presenceClient = createPresenceClient({
 
 const chatClient = createChatClient({
     logError,
+    onMessageFailed: ({ clientMessageId, reason }) => {
+        markMessageFailed(clientMessageId);
+        logError(`runtime/chatClient 消息未确认: ${reason}`, null, 'warn');
+        requestStoreSync();
+    },
     onMessage: (message) => {
         console.log('[Chat WS]', message.type, message);
 
@@ -770,8 +775,12 @@ function createClientMessageId() {
     return 'local_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
 }
 
-async function sendChatMessage(text) {
-    const cleanText = String(text || '').trim();
+async function sendChatMessage(text, retryMessageId = null) {
+    const retryMessage = retryMessageId
+        ? chatStore.messages.find((message) => message.clientMessageId === retryMessageId)
+        : null;
+    if (retryMessageId && (!retryMessage?.isSelf || retryMessage.status !== 'failed')) return false;
+    const cleanText = String(retryMessage?.content || text || '').trim();
     if (!cleanText) return false;
 
     const currentChannel = roomConnectionFeature?.getCurrentChannel?.();
@@ -780,12 +789,13 @@ async function sendChatMessage(text) {
         return false;
     }
 
-    const clientMessageId = createClientMessageId();
+    if (retryMessage && retryMessage.channelId !== currentChannel) return false;
+    const clientMessageId = retryMessage?.clientMessageId || createClientMessageId();
     const senderUserId = chatClient.getUserId?.() || profileStore.userId;
     const senderIdentity = chatClient.getIdentity?.() || presenceClient.getIdentity?.() || senderUserId;
     const senderName = profileStore.displayName || getInputValue('username', localStorage.getItem('lk_username') || '') || '访客';
 
-    const localMessage = addChatMessage({
+    const localMessage = retryMessage ? addChatMessage({ ...retryMessage, status: 'sending' }) : addChatMessage({
         id: clientMessageId,
         clientMessageId,
         channelId: currentChannel,
@@ -804,6 +814,12 @@ async function sendChatMessage(text) {
 
     // Phase 2.1：发送前确保 Chat WebSocket 处于 OPEN，并补订阅当前频道。
     await ensureChatSocketConnected(3000);
+    if (roomConnectionFeature?.getCurrentChannel?.() !== currentChannel) {
+        markMessageFailed(clientMessageId);
+        requestStoreSync();
+        return false;
+    }
+    if (localMessage.status === 'sent') return true;
     if (currentChannel) chatClient.subscribeChannel(currentChannel);
 
     let sent = chatClient.sendMessage({
@@ -818,6 +834,12 @@ async function sendChatMessage(text) {
     // 临界状态兜底：如果第一次发送失败，等待/重连后再重试一次。
     if (!sent) {
         await ensureChatSocketConnected(2000);
+        if (roomConnectionFeature?.getCurrentChannel?.() !== currentChannel) {
+            markMessageFailed(clientMessageId);
+            requestStoreSync();
+            return false;
+        }
+        if (localMessage.status === 'sent') return true;
         if (currentChannel) chatClient.subscribeChannel(currentChannel);
         sent = chatClient.sendMessage({
             clientMessageId: localMessage.clientMessageId || clientMessageId,
@@ -942,11 +964,8 @@ async function ensureChatSocketConnected(timeoutMs = 3000) {
     };
 
     try {
-        if (chatClient.ensureConnected) {
-            await chatClient.ensureConnected(options, timeoutMs);
-        } else {
-            await chatClient.connect(options);
-        }
+        const connected = await chatClient.ensureConnected(options, timeoutMs);
+        if (!connected) return false;
     } catch (error) {
         logError('runtime/ensureChatSocketConnected 连接 Chat WebSocket 失败', error, 'warn');
     }

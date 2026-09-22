@@ -8,10 +8,23 @@
  * - Reaction / Pin 同步
  * - 断线重连
  */
-export function createChatClient({ logError, onMessage, onConnectionChange } = {}) {
+const CONNECT_TIMEOUT_MS = 3000;
+const ACK_TIMEOUT_MS = 10_000;
+const HEARTBEAT_INTERVAL_MS = 12_000;
+const PONG_TIMEOUT_MS = 30_000;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30_000;
+
+export function createChatClient({ logError, onMessage, onConnectionChange, onMessageFailed, webSocketFactory } = {}) {
   let socket = null;
+  let connectionAttempt = null;
   let shouldReconnect = false;
   let reconnectTimer = null;
+  let reconnectAttempt = 0;
+  let heartbeatTimer = null;
+  let pongTimer = null;
+  const pendingMessages = new Map();
+  const createSocket = webSocketFactory || ((url) => new WebSocket(url));
   let lastConnectOptions = null;
   // currentChannelId 表示前端希望订阅的频道；confirmed/pending 用于避免重复订阅。
   let currentChannelId = null;
@@ -57,35 +70,88 @@ export function createChatClient({ logError, onMessage, onConnectionChange } = {
     };
   }
 
-  function waitUntilConnected(timeoutMs = 3000) {
-    if (isConnected()) return Promise.resolve(true);
-
+  function boundedWait(promise, timeoutMs) {
     return new Promise((resolve) => {
-      const startedAt = Date.now();
-      const timer = setInterval(() => {
-        if (isConnected()) {
-          clearInterval(timer);
-          resolve(true);
-          return;
-        }
-
-        if (Date.now() - startedAt >= timeoutMs) {
-          clearInterval(timer);
-          resolve(false);
-        }
-      }, 50);
+      const timer = setTimeout(() => resolve(false), connectionTimeout(timeoutMs));
+      promise.then((connected) => {
+        clearTimeout(timer);
+        resolve(connected);
+      });
     });
   }
 
-  async function ensureConnected(options = {}, timeoutMs = 3000) {
-    if (isConnected()) return true;
+  function connectionTimeout(timeoutMs) {
+    return Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : CONNECT_TIMEOUT_MS;
+  }
 
+  function waitUntilConnected(timeoutMs = CONNECT_TIMEOUT_MS) {
+    if (isConnected()) return Promise.resolve(true);
+    if (!connectionAttempt) return Promise.resolve(false);
+    return boundedWait(connectionAttempt.promise, timeoutMs);
+  }
+
+  function ensureConnected(options = {}, timeoutMs = CONNECT_TIMEOUT_MS) {
+    if (isConnected()) return Promise.resolve(true);
     const connectOptions = { ...(lastConnectOptions || {}), ...(options || {}) };
-    if (connectOptions.apiBase) {
-      await connect(connectOptions);
-    }
+    // 从调用开始计时；并发调用共享握手，但较短的调用期限不会取消其他等待者。
+    return boundedWait(connect(connectOptions, timeoutMs), timeoutMs);
+  }
 
-    return waitUntilConnected(timeoutMs);
+  function scheduleReconnect() {
+    if (!shouldReconnect || !lastConnectOptions?.apiBase || reconnectTimer !== null) return;
+    const exponential = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * (2 ** reconnectAttempt));
+    const delayMs = Math.min(RECONNECT_MAX_MS, Math.round(exponential * (0.75 + Math.random() * 0.5)));
+    reconnectAttempt += 1;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect(lastConnectOptions);
+    }, delayMs);
+  }
+
+  function clearHeartbeat() {
+    clearTimeout(heartbeatTimer);
+    clearTimeout(pongTimer);
+    heartbeatTimer = null;
+    pongTimer = null;
+  }
+
+  function startHeartbeat(candidate) {
+    clearHeartbeat();
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = null;
+      if (socket !== candidate) return;
+      // 先登记期限；即使浏览器始终不触发 close，黑洞连接也会被淘汰。
+      pongTimer = setTimeout(() => retireSocket(candidate, 'pong_timeout'), PONG_TIMEOUT_MS);
+      if (!send({ type: 'ping', clientTime: Date.now() })) retireSocket(candidate, 'send_failed');
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  function clearPendingMessage(clientMessageId) {
+    const pending = pendingMessages.get(clientMessageId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    pendingMessages.delete(clientMessageId);
+    return true;
+  }
+
+  function failPendingMessage(clientMessageId, reason) {
+    if (clearPendingMessage(clientMessageId)) onMessageFailed?.({ clientMessageId, reason });
+  }
+
+  function retireSocket(candidate, reason) {
+    if (socket !== candidate) return;
+    // 先失效再 close，所有迟到的回调只能作用于原 socket。
+    socket = null;
+    connectionAttempt?.finish(false);
+    clearHeartbeat();
+    confirmedChannelId = null;
+    pendingSubscribeChannelId = null;
+    try { candidate.close(); } catch (_) {}
+    scheduleReconnect();
+    for (const clientMessageId of Array.from(pendingMessages.keys())) {
+      failPendingMessage(clientMessageId, reason);
+    }
+    emitConnectionState(false);
   }
 
   function emitConnectionState(connected) {
@@ -110,15 +176,16 @@ export function createChatClient({ logError, onMessage, onConnectionChange } = {
     }
   }
 
-  async function connect(options = {}) {
-    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-      return;
-    }
+  // 每次握手的所有出口都 resolve boolean，不留下无人处理的 rejection。
+  function connect(options = {}, timeoutMs = CONNECT_TIMEOUT_MS) {
+    if (isConnected()) return Promise.resolve(true);
+    if (connectionAttempt) return connectionAttempt.promise;
+    if (socket) retireSocket(socket, 'connection_closed');
 
     const apiBase = options.apiBase;
     if (!apiBase) {
       logError?.('chatClient/connect 缺少 apiBase，跳过连接', null, 'warn');
-      return;
+      return Promise.resolve(false);
     }
 
     userId = String(options.userId || options.identity || '').trim();
@@ -146,6 +213,8 @@ export function createChatClient({ logError, onMessage, onConnectionChange } = {
       statusText,
     };
     shouldReconnect = true;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
 
     const wsBase = toWsBase(apiBase);
     const params = new URLSearchParams({
@@ -160,78 +229,104 @@ export function createChatClient({ logError, onMessage, onConnectionChange } = {
     });
     const url = `${wsBase}/ws/chat?${params.toString()}`;
 
-    await new Promise((resolve) => {
-      socket = new WebSocket(url);
+    let candidate;
+    try {
+      candidate = createSocket(url);
+    } catch (error) {
+      scheduleReconnect();
+      logError?.('chatClient/connect 创建 Chat 连接失败', error, 'warn');
+      return Promise.resolve(false);
+    }
+    socket = candidate;
+    let resolveAttempt;
+    const promise = new Promise((resolve) => { resolveAttempt = resolve; });
+    const attempt = {
+      promise,
+      finish(connected) {
+        if (connectionAttempt !== attempt) return;
+        clearTimeout(attempt.timer);
+        connectionAttempt = null;
+        resolveAttempt(connected);
+      },
+      timer: setTimeout(() => retireSocket(candidate, 'connect_timeout'), connectionTimeout(timeoutMs)),
+    };
+    connectionAttempt = attempt;
 
-      socket.onopen = () => {
-        console.log('[Chat] 已连接', url);
-        confirmedChannelId = null;
-        pendingSubscribeChannelId = null;
-        emitConnectionState(true);
+    candidate.onopen = () => {
+      if (socket !== candidate) return;
+      attempt.finish(true);
+      reconnectAttempt = 0;
+      startHeartbeat(candidate);
+      console.log('[Chat] 已连接', url);
+      confirmedChannelId = null;
+      pendingSubscribeChannelId = null;
+      emitConnectionState(true);
 
-        if (currentChannelId) {
-          subscribeChannel(currentChannelId, { force: true });
-        } else {
-          send({ type: 'request_state' });
+      if (currentChannelId) {
+        subscribeChannel(currentChannelId, { force: true });
+      } else {
+        send({ type: 'request_state' });
+      }
+    };
+
+    candidate.onmessage = (event) => {
+      if (socket !== candidate) return;
+      let message = null;
+      try {
+        message = JSON.parse(event.data);
+      } catch (error) {
+        logError?.('chatClient/onmessage 解析 Chat 消息失败', error, 'warn');
+        return;
+      }
+
+      if (!message || typeof message !== 'object') return;
+      if (message.type === 'pong') {
+        if (pongTimer !== null) startHeartbeat(candidate);
+        return;
+      }
+      if (message.type === 'message_ack') {
+        clearPendingMessage(message.clientMessageId);
+      } else if (message.type === 'message_created' && message.message) {
+        // 服务器广播同样证明消息已持久化；避免随后 ACK 超时覆盖 sent。
+        clearPendingMessage(message.message.clientMessageId);
+      }
+
+      if (message.type === 'chat_subscribed') {
+        confirmedChannelId = message.channelId || null;
+        currentChannelId = confirmedChannelId;
+        if (pendingSubscribeChannelId === confirmedChannelId) {
+          pendingSubscribeChannelId = null;
         }
+      }
 
-        resolve();
-      };
+      onMessage?.(message);
+    };
 
-      socket.onmessage = (event) => {
-        let message = null;
-        try {
-          message = JSON.parse(event.data);
-        } catch (error) {
-          logError?.('chatClient/onmessage 解析 Chat 消息失败', error, 'warn');
-          return;
-        }
+    candidate.onerror = (event) => {
+      if (socket !== candidate) return;
+      retireSocket(candidate, 'connection_error');
+      logError?.('chatClient/socket Chat 连接错误', event, 'warn');
+    };
 
-        if (message.type === 'chat_subscribed') {
-          confirmedChannelId = message.channelId || null;
-          currentChannelId = confirmedChannelId;
-          if (pendingSubscribeChannelId === confirmedChannelId) {
-            pendingSubscribeChannelId = null;
-          }
-        }
-
-        onMessage?.(message);
-      };
-
-      socket.onerror = (event) => {
-        logError?.('chatClient/socket Chat 连接错误', event, 'warn');
-      };
-
-      socket.onclose = () => {
-        console.warn('[Chat] 连接已关闭');
-        socket = null;
-        confirmedChannelId = null;
-        pendingSubscribeChannelId = null;
-        emitConnectionState(false);
-
-        if (shouldReconnect && lastConnectOptions?.apiBase) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = setTimeout(() => {
-            connect(lastConnectOptions).catch((error) => {
-              logError?.('chatClient/reconnect Chat 重连失败', error, 'warn');
-            });
-          }, 1500);
-        }
-      };
-    });
+    candidate.onclose = () => {
+      if (socket !== candidate) return;
+      console.warn('[Chat] 连接已关闭');
+      retireSocket(candidate, 'connection_closed');
+    };
+    return promise;
   }
 
   function disconnect() {
     shouldReconnect = false;
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+    reconnectAttempt = 0;
 
     if (socket) {
-      socket.close();
-      socket = null;
+      retireSocket(socket, 'disconnected');
+    } else {
+      emitConnectionState(false);
     }
-
-    emitConnectionState(false);
   }
 
   function subscribeChannel(channelId, options = {}) {
@@ -268,7 +363,12 @@ export function createChatClient({ logError, onMessage, onConnectionChange } = {
   }
 
   function sendMessage({ clientMessageId, channelId, content, senderColor, senderPreset, senderAvatarUrl }) {
-    return send({
+    if (!clientMessageId || !isConnected()) return false;
+    if (pendingMessages.has(clientMessageId)) return true;
+    pendingMessages.set(clientMessageId, {
+      timer: setTimeout(() => failPendingMessage(clientMessageId, 'ack_timeout'), ACK_TIMEOUT_MS),
+    });
+    const sent = send({
       type: 'send_message',
       clientMessageId,
       channelId: channelId || currentChannelId,
@@ -277,6 +377,9 @@ export function createChatClient({ logError, onMessage, onConnectionChange } = {
       senderPreset: senderPreset ?? avatarPreset,
       senderAvatarUrl: senderAvatarUrl ?? avatarUrl,
     });
+    if (!sent) clearPendingMessage(clientMessageId);
+    // true 仅表示已写入 socket，送达由 ACK / 广播决定。
+    return sent;
   }
 
   function toggleReaction({ messageId, emoji, channelId }) {

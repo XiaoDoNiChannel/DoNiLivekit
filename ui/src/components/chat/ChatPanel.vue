@@ -8,7 +8,7 @@ import { renderMessageContent, QUICK_REACTIONS, EMOJI_LIST } from '../../shared/
 import { appStore } from '../../stores/appStore.js';
 import { silentSyncReaction, uploadChatImage } from '../../shared/apiClient.js';
 
-const emit = defineEmits(['send']);
+const emit = defineEmits(['send', 'retry']);
 // ─── 输入框状态 ────────────────────────────────────────────────────────────────
 const inputText = ref('');
 const textareaEl = ref(null);
@@ -1170,6 +1170,14 @@ function formatFullTime(ts) {
             v-html="renderContent(msg.content)"
             @click="onMessageContentClick"
           />
+
+          <span v-if="msg.isSelf && msg.status === 'sending'" class="text-xs text-[#949ba4]">发送中…</span>
+          <button
+            v-if="msg.isSelf && msg.status === 'failed'"
+            class="text-xs text-[#f23f42] hover:underline disabled:opacity-50"
+            :disabled="!isConnected"
+            @click.stop="emit('retry', msg.clientMessageId)"
+          >发送未确认，点击重试</button>
 
           <!-- Reactions：只显示普通表情回应；旧版 📌 会被过滤 -->
           <div v-if="hasVisibleReactions(msg.reactions)" class="flex flex-wrap gap-1 mt-1.5">
