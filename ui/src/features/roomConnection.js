@@ -6,6 +6,7 @@ export function createRoomConnectionFeature(context) {
     let currentChannel = null;
     let isInLobby = false;
     let channels = ['day0', 'day1', 'day2'];
+    let lobbyChannel = null;
     let roomPollTimer = null;
     let isPolling = false;
     let shouldRestoreMicAfterChannelSwitch = false;
@@ -86,6 +87,7 @@ export function createRoomConnectionFeature(context) {
 
         const rows = await response.json();
         if (!Array.isArray(rows)) return getAvailableChannelNames();
+        lobbyChannel = rows.find(row => row?.isLobby)?.name || null;
 
         const nextChannels = rows
             .map((row) => (row && row.name ? String(row.name).trim() : ''))
@@ -216,7 +218,7 @@ export function createRoomConnectionFeature(context) {
         isInLobby = true;
         document.getElementById('btn-connect').innerText = '🏛️ 已进入大厅';
         document.getElementById('btn-connect').style.backgroundColor = '#1a6334';
-        document.getElementById('header').innerText = '# 🏛️ DoNiChannel 电竞大厅（选择左侧语音分组）';
+        // The channel header and diagnostic controls are owned by Vue.
 
         try {
             const { profileStore } = await import('../stores/profileStore.js');
@@ -236,7 +238,7 @@ export function createRoomConnectionFeature(context) {
             const availableChannels = getAvailableChannelNames();
             if (availableChannels.length > 0) {
                 const savedChannel = localStorage.getItem(LAST_CHANNEL_STORAGE_KEY);
-                const targetChannel = savedChannel && availableChannels.includes(savedChannel)
+                const targetChannel = lobbyChannel && availableChannels.includes(lobbyChannel) ? lobbyChannel : savedChannel && availableChannels.includes(savedChannel)
                     ? savedChannel
                     : availableChannels[0];
                 await switchChannel(targetChannel);
@@ -269,9 +271,10 @@ export function createRoomConnectionFeature(context) {
             const currentRoom = context.getRoom();
             if (currentRoom) {
                 try {
-                    if (context.isTauriClient && (context.rustMic.getIsMicOn() || context.rustMic.getIsRustMicOn() || context.rustMic.hasLocalRustMicPublication())) {
+                    const usesRustMic = context.isTauriClient && context.rustMic.getCurrentMicSource() === 'rust';
+                    if (usesRustMic && (context.rustMic.getIsMicOn() || context.rustMic.getIsRustMicOn() || context.rustMic.hasLocalRustMicPublication())) {
                         await context.rustMic.stopRustMicShare();
-                    } else if (!context.isTauriClient && context.rustMic.getIsMicOn() && currentRoom.localParticipant) {
+                    } else if (!usesRustMic && context.rustMic.getIsMicOn() && currentRoom.localParticipant) {
                         await currentRoom.localParticipant.setMicrophoneEnabled(false).catch(() => {});
                         context.rustMic.setMicOn(false);
                     }
@@ -316,7 +319,8 @@ export function createRoomConnectionFeature(context) {
             const nextRoom = context.getRoom();
             if (shouldRestoreMicAfterChannelSwitch && nextRoom && nextRoom.localParticipant) {
                 try {
-                    if (context.isTauriClient) {
+                    const usesRustMic = context.isTauriClient && context.rustMic.getCurrentMicSource() === 'rust';
+                    if (usesRustMic) {
                         await context.updateMicList().catch((error) => logError('roomConnection/switchChannel 恢复麦克风前刷新设备列表失败', error, 'warn'));
                         await context.rustMic.startRustMicShare();
                         context.rustMic.showRustMicUi();
@@ -401,7 +405,8 @@ export function createRoomConnectionFeature(context) {
             });
 
             context.livekitEvents.registerRoomEvents(nextRoom);
-            await nextRoom.connect(serverConfig.livekitWs, data.token);
+            await nextRoom.connect(serverConfig.livekitWs, data.token, { autoSubscribe: false });
+            context.livekitEvents.syncSubscriptions();
             currentChannel = targetRoomName;
             context.setRoom(nextRoom);
         } catch (error) {
@@ -414,11 +419,9 @@ export function createRoomConnectionFeature(context) {
 
             currentChannel = null;
             context.setRoom(null);
-            setText('header', '# 🏛️ DoNiChannel 电竞大厅（连接失败，请重试）');
             return false;
         }
 
-        setText('header', `# 🔊 ${targetRoomName} 语音分组`);
         setText('ui-username', username);
         setText('ui-status', '已连接: ' + targetRoomName);
         const uiStatus = document.getElementById('ui-status');
@@ -482,22 +485,37 @@ export function createRoomConnectionFeature(context) {
             logError('roomConnection/leaveRoom 断开 Presence 失败', error, 'warn');
         }
 
-        if (context.isTauriClient && context.rustMic.getIsMicOn()) {
+        const room = context.getRoom();
+        const usesRustMic = context.isTauriClient && context.rustMic.getCurrentMicSource() === 'rust';
+        if (usesRustMic && (context.rustMic.getIsMicOn() || context.rustMic.getIsRustMicOn() || context.rustMic.hasLocalRustMicPublication())) {
             await context.rustMic.stopRustMicShare();
+        } else if (!usesRustMic && context.rustMic.getIsMicOn() && room?.localParticipant) {
+            await room.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+            context.rustMic.setMicOn(false);
         }
 
-        context.appAudio.stopAppAudioShare();
+        await context.appAudio.stopAppAudioShare();
         stopRoomPolling();
+        if (room?.localParticipant && context.screenShare.getIsScreenOn()) {
+            await room.localParticipant.setScreenShareEnabled(false).catch(error => logError('roomConnection/leaveRoom 停止画面失败', error, 'warn'));
+        }
+        context.livekitEvents.clearLocalScreenControls();
+        context.remoteAudio.clearRemoteGainNodes();
         context.screenShare.stopScreenBitrateMonitor();
         context.screenShare.hideLocalScreenPreview();
 
-        const room = context.getRoom();
-        if (room) room.disconnect();
+        if (room) await room.disconnect();
         context.audioPipelines.teardownLocalPcmPipeline();
+        context.audioPipelines.teardownRustMicPipeline();
+        context.setRoom(null);
+        currentChannel = null;
+        isInLobby = false;
+        resetRoomUIAfterDisconnect();
+        const username = document.getElementById('username');
+        if (username) username.disabled = false;
+        const connectButton = document.getElementById('btn-connect');
+        if (connectButton) { connectButton.textContent = '进入大厅'; connectButton.style.backgroundColor = ''; }
 
-        setTimeout(() => {
-            window.location.reload();
-        }, 100);
     }
 
     return {

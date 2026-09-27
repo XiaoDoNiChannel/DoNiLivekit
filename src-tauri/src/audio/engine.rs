@@ -1,17 +1,18 @@
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
 use tauri::Emitter;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
 use super::dsp::{append_f32_samples_from_bytes, samples_to_pcm_f32le, soft_limit};
 use super::frame::{AudioFrame, AudioFrameQueue, AudioMetrics};
@@ -21,9 +22,6 @@ use crate::transport::pcm_websocket::{MICROPHONE_ADDRESS, PROCESS_AUDIO_ADDRESS}
 
 #[cfg(target_os = "windows")]
 use std::sync::{mpsc as std_mpsc, Mutex as StdMutex};
-
-#[cfg(target_os = "windows")]
-use std::time::Duration;
 
 #[cfg(target_os = "windows")]
 use windows::{
@@ -395,6 +393,7 @@ fn query_mix_sample_rate() -> Result<u32, String> {
 pub(crate) async fn start_audio_pump(
     capture_tx: broadcast::Sender<Vec<u32>>,
     latest_capture_pids: Arc<Mutex<Vec<u32>>>,
+    local_audio_instance_id: String,
 ) {
     let addr = PROCESS_AUDIO_ADDRESS;
     // 建立本地服务
@@ -412,6 +411,7 @@ pub(crate) async fn start_audio_pump(
     while let Ok((stream, _)) = listener.accept().await {
         let mut pid_rx = capture_tx.subscribe();
         let latest_capture_pids_ref = latest_capture_pids.clone();
+        let instance_id = local_audio_instance_id.clone();
         tokio::spawn(async move {
             let mut ws_stream = match accept_async(stream).await {
                 Ok(v) => v,
@@ -420,6 +420,12 @@ pub(crate) async fn start_audio_pump(
                     return;
                 }
             };
+            if let Err(error) =
+                authenticate_local_pcm_client(&mut ws_stream, "process_audio", &instance_id).await
+            {
+                println!("[audio/process_loopback] 本地 PCM 握手失败: {error}");
+                return;
+            }
             println!(
                 "✅ 前端 JS 已连接音频 WebSocket，等待 start_capture/start_capture_multi 指令..."
             );
@@ -605,6 +611,46 @@ pub(crate) async fn start_audio_pump(
 
 const MIC_FRAME_SAMPLES: usize = 480;
 const MIC_QUEUE_CAPACITY_FRAMES: usize = 24;
+const LOCAL_PCM_PROTOCOL_VERSION: u64 = 1;
+
+async fn authenticate_local_pcm_client(
+    ws_stream: &mut WebSocketStream<tokio::net::TcpStream>,
+    service: &str,
+    instance_id: &str,
+) -> Result<(), String> {
+    let hello = serde_json::json!({
+        "type": "pcm_service_hello",
+        "service": service,
+        "instanceId": instance_id,
+        "protocolVersion": LOCAL_PCM_PROTOCOL_VERSION,
+    });
+    ws_stream
+        .send(Message::Text(hello.to_string()))
+        .await
+        .map_err(|error| format!("发送服务身份失败: {error}"))?;
+
+    let reply = tokio::time::timeout(Duration::from_secs(2), ws_stream.next())
+        .await
+        .map_err(|_| "等待前端确认服务身份超时".to_string())?
+        .ok_or_else(|| "前端在确认服务身份前断开".to_string())?
+        .map_err(|error| format!("读取前端身份确认失败: {error}"))?;
+
+    let Message::Text(payload) = reply else {
+        return Err("前端身份确认不是文本消息".to_string());
+    };
+    let ack: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|error| format!("前端身份确认不是有效 JSON: {error}"))?;
+    let is_valid = ack.get("type").and_then(|value| value.as_str()) == Some("pcm_service_ack")
+        && ack.get("service").and_then(|value| value.as_str()) == Some(service)
+        && ack.get("instanceId").and_then(|value| value.as_str()) == Some(instance_id)
+        && ack.get("protocolVersion").and_then(|value| value.as_u64())
+            == Some(LOCAL_PCM_PROTOCOL_VERSION);
+    if !is_valid {
+        return Err("前端身份确认与当前桌面进程不匹配".to_string());
+    }
+
+    Ok(())
+}
 
 struct VadGate {
     pre_roll: VecDeque<[f32; MIC_FRAME_SAMPLES]>,
@@ -714,6 +760,7 @@ pub(crate) async fn start_mic_pump(
     state_threshold: Arc<Mutex<f32>>,
     state_boost: Arc<Mutex<f32>>, // 👈 接收增益参数
     selected_mic_device_id: Arc<Mutex<Option<String>>>,
+    local_audio_instance_id: String,
 ) {
     let addr = MICROPHONE_ADDRESS;
     let listener = match TcpListener::bind(&addr).await {
@@ -731,12 +778,19 @@ pub(crate) async fn start_mic_pump(
         let threshold_clone = state_threshold.clone();
         let boost_clone = state_boost.clone();
         let selected_mic_device_id_clone = selected_mic_device_id.clone();
+        let instance_id = local_audio_instance_id.clone();
 
         tokio::spawn(async move {
             let mut ws_stream = match accept_async(stream).await {
                 Ok(v) => v,
                 Err(_) => return,
             };
+            if let Err(error) =
+                authenticate_local_pcm_client(&mut ws_stream, "microphone", &instance_id).await
+            {
+                println!("[audio/microphone] 本地 PCM 握手失败: {error}");
+                return;
+            }
 
             let Some(session) = mic_sessions_clone.begin_session().await else {
                 let _ = ws_stream.close(None).await;

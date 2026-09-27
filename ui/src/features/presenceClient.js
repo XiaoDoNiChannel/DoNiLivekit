@@ -240,6 +240,7 @@ export function createPresenceClient({ logError, onMessage, onConnectionChange, 
     }
 
     return {
+        sendWorkspaceCommand: payload => send(payload),
         connect,
         disconnect,
         requestSnapshot,

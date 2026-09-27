@@ -2,8 +2,10 @@ import { alertError, formatError, logError } from '../shared/errors.js';
 
 /** 创建 Rust 麦克风发布模块；负责把 9002 产生的 track 发布成 LiveKit microphone。 */
 export function createRustMicFeature(context) {
+    const MIC_SOURCE_STORAGE_KEY = 'lk_mic_source';
     let isMicOn = false;
-    let currentMicSource = context.isTauriClient ? 'rust' : 'browser';
+    const savedMicSource = localStorage.getItem(MIC_SOURCE_STORAGE_KEY);
+    let currentMicSource = context.isTauriClient && savedMicSource === 'browser' ? 'browser' : (context.isTauriClient ? 'rust' : 'browser');
     let isRustMicOn = false;
     let localRustMicPublication = null;
     let hasRegisteredRustMicErrorListener = false;
@@ -18,7 +20,9 @@ export function createRustMicFeature(context) {
 
     /** 浏览器麦克风 fallback 的约束配置，Rust 麦克风不使用这组参数。 */
     function getMicCaptureOptions() {
+        const savedDeviceId = localStorage.getItem('lk_mic') || undefined;
         return {
+            deviceId: savedDeviceId,
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
@@ -46,44 +50,67 @@ export function createRustMicFeature(context) {
 
         if (isMicOn) {
             btn.classList.add('active');
-            btn.innerHTML = '🔇';
+
             btn.setAttribute('data-tooltip', currentMicSource === 'rust' ? '关闭 Rust 麦克风' : '关闭浏览器麦克风');
         } else {
             btn.classList.remove('active');
-            btn.innerHTML = '🎤';
+
             btn.setAttribute('data-tooltip', currentMicSource === 'rust' ? '开启 Rust 麦克风' : '开启浏览器麦克风');
         }
     }
 
     /** 在浏览器麦克风和 Rust 麦克风之间切换；已开麦时会自动切换发布源。 */
-    function switchMicSource(source) {
+    async function switchMicSource(source) {
         if (source !== 'browser' && source !== 'rust') return;
+        if (!context.isTauriClient && source === 'rust') return;
         if (currentMicSource === source) return;
-        currentMicSource = source;
 
         const room = context.getRoom();
+        const wasMicOn = isMicOn;
+        const previousSource = currentMicSource;
         const micSelect = document.getElementById('mic-select');
         if (micSelect) {
             micSelect.disabled = !(room && room.localParticipant);
         }
 
-        updateMicSourceButton();
+        try {
+            if (room?.localParticipant && wasMicOn) {
+                if (previousSource === 'rust') {
+                    await stopRustMicShare();
+                } else {
+                    await room.localParticipant.setMicrophoneEnabled(false);
+                    isMicOn = false;
+                }
+            }
 
-        if (!room || !room.localParticipant) return;
-        if (!isMicOn) return;
+            currentMicSource = source;
+            localStorage.setItem(MIC_SOURCE_STORAGE_KEY, source);
 
-        if (source === 'browser') {
-            stopRustMicShare().then(() => {
-                room.localParticipant.setMicrophoneEnabled(true, getMicCaptureOptions()).catch((e) => {
-                    logError('rustMic/switchMicSource 切换到浏览器麦克风失败', e);
-                });
-            }).catch((error) => logError('rustMic/switchMicSource 停止 Rust 麦克风失败', error));
-        } else {
-            room.localParticipant.setMicrophoneEnabled(false).catch(() => {});
-            startRustMicShare().catch((e) => {
-                logError('rustMic/switchMicSource 切换到 Rust 麦克风失败', e);
-            });
+            if (room?.localParticipant && wasMicOn) {
+                if (source === 'rust') {
+                    await startRustMicShare();
+                    isRustMicOn = true;
+                    showRustMicUi();
+                } else {
+                    await room.localParticipant.setMicrophoneEnabled(true, getMicCaptureOptions());
+                    isRustMicOn = false;
+                    hideRustMicUi();
+                }
+                isMicOn = true;
+            } else if (source === 'rust') {
+                showRustMicUi();
+            } else {
+                hideRustMicUi();
+            }
+        } catch (error) {
+            isMicOn = false;
+            isRustMicOn = false;
+            logError('rustMic/switchMicSource 切换麦克风处理模式失败', error);
+            alertError('切换麦克风处理模式失败', error);
         }
+
+        updateMicSourceButton();
+        await context.updateMicList();
     }
 
     /** 启动 Rust 采集、初始化 9002 管线，并 publish 为 LiveKit microphone track。 */
@@ -193,7 +220,7 @@ export function createRustMicFeature(context) {
                 await startRustMicShare();
                 if (btn) {
                     btn.classList.add('active');
-                    btn.innerHTML = '🔇 <span>关闭麦克风</span>';
+
                 }
             } catch (error) {
                 logError('rustMic/toggleRustMicShare 启动麦克风失败', error);
@@ -204,19 +231,25 @@ export function createRustMicFeature(context) {
             await stopRustMicShare();
             if (btn) {
                 btn.classList.remove('active');
-                btn.innerHTML = '🎙️ <span>开启麦克风</span>';
+
             }
         }
     }
 
-    /** 主麦克风按钮入口：Tauri 默认走 Rust 麦克风，浏览器环境走 LiveKit 本地麦克风。 */
+    /** 主麦克风按钮入口：按当前选择使用 Rust 管线或浏览器 AEC 管线。 */
     async function toggleMic() {
         const btn = document.getElementById('btn-mic');
         const room = context.getRoom();
+        const useRustMic = context.isTauriClient && currentMicSource === 'rust';
+
+        if (!room?.localParticipant) {
+            alertError('麦克风启动失败', new Error('当前没有连接到语音频道'));
+            return;
+        }
 
         if (!isMicOn) {
             try {
-                if (context.isTauriClient) {
+                if (useRustMic) {
                     await startRustMicShare();
                     showRustMicUi();
                 } else {
@@ -227,8 +260,8 @@ export function createRustMicFeature(context) {
                 isMicOn = true;
                 if (btn) {
                     btn.classList.add('active');
-                    btn.innerHTML = '🔇';
-                    btn.setAttribute('data-tooltip', context.isTauriClient ? '关闭 Rust 麦克风' : '关闭浏览器麦克风');
+
+                    btn.setAttribute('data-tooltip', useRustMic ? '关闭 Rust 麦克风' : '关闭浏览器麦克风');
                 }
             } catch (e) {
                 logError('rustMic/toggleMic 开麦失败', e);
@@ -236,7 +269,7 @@ export function createRustMicFeature(context) {
             }
         } else {
             try {
-                if (context.isTauriClient) {
+                if (useRustMic) {
                     await stopRustMicShare();
                     hideRustMicUi();
                 } else {
@@ -246,8 +279,8 @@ export function createRustMicFeature(context) {
                 isMicOn = false;
                 if (btn) {
                     btn.classList.remove('active');
-                    btn.innerHTML = '🎤';
-                    btn.setAttribute('data-tooltip', context.isTauriClient ? '开启 Rust 麦克风' : '开启浏览器麦克风');
+
+                    btn.setAttribute('data-tooltip', useRustMic ? '开启 Rust 麦克风' : '开启浏览器麦克风');
                 }
             } catch (e) {
                 logError('rustMic/toggleMic 关麦失败', e);

@@ -316,6 +316,33 @@ test('message store transitions sending -> failed -> sent on late confirmation',
   assert.equal(message.status, 'sent');
 });
 
+test('leaving chat clears the active messages but preserves history for rejoining', async (t) => {
+  const { chatStore, switchChatChannel, deactivateChatChannel, addChatMessage, applyServerChatMessage } = await loadChatStore(t);
+  switchChatChannel('leave-room-test');
+  addChatMessage({ id: 'saved-before-leave', content: 'saved history', channelId: 'leave-room-test' });
+  deactivateChatChannel();
+  assert.equal(chatStore.currentChannelId, null);
+  assert.deepEqual(chatStore.messages, []);
+  assert.match(localStorage.getItem('donichannel_chat_v1_leave-room-test'), /saved history/);
+  // A response arriving after leave must update the cache, not reactivate chat.
+  applyServerChatMessage({ id: 'late-message', content: 'late history', channelId: 'leave-room-test' });
+  assert.equal(chatStore.currentChannelId, null);
+  assert.deepEqual(chatStore.messages, []);
+  switchChatChannel('leave-room-test');
+  assert.deepEqual(chatStore.messages.map(message => message.id), ['saved-before-leave', 'late-message']);
+});
+
+test('runtime snapshots clear the channel on leave and preserve it for unrelated updates', async () => {
+  const { appStore, syncFromRuntimeSnapshot } = await import('../src/stores/appStore.js');
+  syncFromRuntimeSnapshot({ currentChannel: 'day0', isInLobby: true, isConnected: true });
+  syncFromRuntimeSnapshot({ username: 'rain' });
+  assert.equal(appStore.connection.currentChannel, 'day0');
+  syncFromRuntimeSnapshot({ currentChannel: null, isInLobby: false, isConnected: false });
+  assert.equal(appStore.connection.currentChannel, null);
+  assert.equal(appStore.connection.isInLobby, false);
+  assert.equal(appStore.connection.isConnected, false);
+});
+
 test('history confirmation cannot be downgraded by a later ACK timeout', async (t) => {
   const { switchChatChannel, addChatMessage, applyServerChatMessage, markMessageFailed } = await loadChatStore(t);
   switchChatChannel('history-test');

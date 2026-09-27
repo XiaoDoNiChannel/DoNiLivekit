@@ -41,6 +41,7 @@ async function startCaptureMultiWithRetry(invoke, pids, maxAttempts = 8, interva
 /** 创建应用音频共享模块。context 提供 room、publication 和 9001 PCM 管线操作。 */
 export function createAppAudioFeature(context) {
     const selectedAppAudioPids = new Set();
+    let starting = false;
 
     /** 根据房间连接和共享状态刷新左下角应用音频按钮。 */
     function updateAppAudioButtons() {
@@ -53,11 +54,11 @@ export function createAppAudioFeature(context) {
 
         if (context.getIsAppAudioSharing()) {
             btn.classList.add('active');
-            btn.innerHTML = '🛑';
+
             btn.setAttribute('data-tooltip', '停止音频共享');
         } else {
             btn.classList.remove('active');
-            btn.innerHTML = '🎵';
+
             btn.setAttribute('data-tooltip', '共享应用音频');
         }
     }
@@ -135,7 +136,9 @@ export function createAppAudioFeature(context) {
 
     /** 确认进程选择：启动 9001 管线并将 app-audio track 发布到当前频道。 */
     async function confirmAppAudioSelection() {
+        if (starting) return;
         const pids = Array.from(selectedAppAudioPids.values());
+        const programNames = pids.map(pid => document.querySelector(`#process-item-${pid} .process-name`)?.textContent || `进程 ${pid}`);
         if (pids.length === 0) {
             alert('请至少选择一个应用进程。');
             return;
@@ -152,6 +155,7 @@ export function createAppAudioFeature(context) {
             listEl.innerHTML = '<div class="modal-empty">正在启动多应用音频截流并发布轨道，请稍候...</div>';
         }
 
+        starting = true;
         try {
             const oldPublication = context.getLocalAppAudioPublication();
             if (oldPublication) {
@@ -171,7 +175,8 @@ export function createAppAudioFeature(context) {
             // Rust 9001 刚启动时给一点缓冲，避免发布瞬间远端收到空音频。
             await sleep(500);
 
-            const publication = await room.localParticipant.publishTrack(track, { name: 'app-audio' });
+            if (context.getRoom() !== room) { context.teardownLocalPcmPipeline(); return; }
+            const publication = await room.localParticipant.publishTrack(track, { name: `app-audio:${programNames.join('、')}` });
             context.setLocalAppAudioPublication(publication);
             context.setIsAppAudioSharing(true);
             updateAppAudioButtons();
@@ -180,7 +185,10 @@ export function createAppAudioFeature(context) {
             logError('appAudio/confirmAppAudioSelection 共享应用音频失败', error);
             alertError('共享应用音频失败', error);
             context.setIsAppAudioSharing(false);
+            context.teardownLocalPcmPipeline();
             updateAppAudioButtons();
+        } finally {
+            starting = false;
         }
     }
 

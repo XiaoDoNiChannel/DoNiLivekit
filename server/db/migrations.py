@@ -11,7 +11,7 @@ from typing import Iterable
 from .connection import connect
 
 LOGGER = logging.getLogger("donichannel.db.migrations")
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 
 def _current_version(connection: sqlite3.Connection) -> int:
@@ -132,7 +132,24 @@ def _migration_3(connection: sqlite3.Connection, _default_rooms: Iterable[str]) 
     )
 
 
-MIGRATIONS = {1: _migration_1, 2: _migration_2, 3: _migration_3}
+def _migration_4(connection: sqlite3.Connection, _default_rooms: Iterable[str]) -> None:
+    connection.execute("ALTER TABLE rooms ADD COLUMN is_lobby INTEGER NOT NULL DEFAULT 0")
+    connection.execute("ALTER TABLE rooms ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0")
+    # Preserve identifiers/history; the first existing room becomes the lobby.
+    connection.execute("UPDATE rooms SET is_lobby = 1 WHERE id = (SELECT MIN(id) FROM rooms)")
+    connection.execute("""CREATE TABLE party_cards (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, owner_name TEXT NOT NULL,
+        game TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', target_channel TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1, deleted_at INTEGER NOT NULL DEFAULT 0
+    )""")
+    connection.execute("""CREATE TABLE party_interests (
+        card_id TEXT NOT NULL, user_id TEXT NOT NULL, display_name TEXT NOT NULL,
+        created_at INTEGER NOT NULL, PRIMARY KEY(card_id, user_id)
+    )""")
+
+
+MIGRATIONS = {1: _migration_1, 2: _migration_2, 3: _migration_3, 4: _migration_4}
 
 
 def migrate_database(

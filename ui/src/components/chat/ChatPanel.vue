@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
+import { ImagePlus, Smile, Type, ArrowUp, MessageSquare } from 'lucide-vue-next';
 import BaseAvatar from '../common/BaseAvatar.vue';
 import { chatStore, shouldGroupWithPrev, toggleReaction, isMessageMentioningSelf, markChannelRead, getTotalMentionCount } from '../../stores/chatStore.js';
 import { profileStore } from '../../stores/profileStore.js';
@@ -9,8 +10,11 @@ import { appStore } from '../../stores/appStore.js';
 import { silentSyncReaction, uploadChatImage } from '../../shared/apiClient.js';
 
 const emit = defineEmits(['send', 'retry']);
+const props = defineProps({ active: { type: Boolean, default: true } });
+watch(() => props.active, active => { if (active) nextTick(() => { scrollToBottom(); markVisibleChannelRead(); }); });
 // ─── 输入框状态 ────────────────────────────────────────────────────────────────
 const inputText = ref('');
+const showFormatting = ref(false);
 const textareaEl = ref(null);
 const messagesEl = ref(null);
 const imageInputEl = ref(null);
@@ -204,7 +208,10 @@ watch(() => chatStore.currentChannelId, () => {
 watch(() => chatStore.notificationUpdatedAt, () => updateTitleFlash());
 
 // ─── 当前频道名 ───────────────────────────────────────────────────────────────
-const channelName = computed(() => appStore.connection.currentChannel || '聊天');
+const channelName = computed(() => {
+  const id = chatStore.currentChannelId || appStore.connection.currentChannel;
+  return presenceStore.channels.find(c => c.id === id)?.displayName || id || '聊天';
+});
 const isConnected = computed(() => appStore.connection.isConnected);
 
 // ─── @ 提醒与已读状态 ─────────────────────────────────────────────────────────
@@ -213,6 +220,7 @@ function isMentionedMessage(msg) {
 }
 
 function markVisibleChannelRead() {
+  if (!props.active) return;
   const current = chatStore.currentChannelId || appStore.connection.currentChannel;
   if (!current) return;
   if (typeof document !== 'undefined' && document.hidden) return;
@@ -1097,9 +1105,9 @@ function formatFullTime(ts) {
   <aside class="chat-panel-vue flex flex-col h-full bg-[#1e1f22] border-l border-white/5">
     <!-- 顶部标题栏 -->
     <header class="flex items-center gap-2 px-4 py-3 border-b border-white/5 shrink-0">
-      <span class="text-[#959ba4] text-lg">💬</span>
+      <MessageSquare :size="17" aria-hidden="true" />
       <div class="flex-1 min-w-0">
-        <div class="text-[#f2f3f5] font-semibold text-sm leading-none truncate">{{ channelName }}</div>
+        <div class="text-[#f2f3f5] font-semibold text-sm leading-none truncate">房间聊天</div>
         <div class="text-[#6d6f78] text-xs mt-0.5">频道内可见</div>
       </div>
     </header>
@@ -1298,7 +1306,7 @@ function formatFullTime(ts) {
           </div>
         </div>
 
-        <div class="flex items-end min-w-0">
+        <div class="chat-composer-row flex items-end min-w-0">
         <!-- 输入框 -->
         <textarea
           ref="textareaEl"
@@ -1337,14 +1345,15 @@ function formatFullTime(ts) {
             :disabled="!isConnected || isUploadingImage"
             :title="isUploadingImage ? '图片上传中...' : '发送图片'"
             @click.stop="openImagePicker"
-          >{{ isUploadingImage ? '…' : '🖼️' }}</button>
+          ><span v-if="isUploadingImage">…</span><ImagePlus v-else :size="18" /></button>
 
           <!-- Emoji 按钮 -->
           <button
             class="emoji-toggle-btn w-8 h-8 flex items-center justify-center text-[#b5bac1] rounded hover:bg-white/10 hover:text-white transition-colors text-lg"
             title="插入表情"
             @click.stop="showEmojiPicker = !showEmojiPicker"
-          >😊</button>
+          ><Smile :size="18" /></button>
+          <button class="composer-format-toggle w-8 h-8 flex items-center justify-center rounded" aria-label="文字格式" :aria-expanded="showFormatting" @click="showFormatting = !showFormatting"><Type :size="18" /></button>
 
           <!-- 发送按钮 -->
           <button
@@ -1356,9 +1365,7 @@ function formatFullTime(ts) {
             title="发送 (Enter)"
             @click="handleSend"
           >
-            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-            </svg>
+            <ArrowUp :size="18" />
           </button>
         </div>
         </div>
@@ -1387,7 +1394,7 @@ function formatFullTime(ts) {
       </div>
 
       <!-- 富文本格式工具栏 -->
-      <div class="flex items-center gap-0.5 mt-1.5 px-1">
+      <div v-show="showFormatting" class="flex items-center gap-0.5 mt-1.5 px-1">
         <button
           v-for="btn in FORMAT_BUTTONS"
           :key="btn.markup"
@@ -1400,7 +1407,7 @@ function formatFullTime(ts) {
       </div>
 
       <div class="flex items-center justify-between mt-1 px-1">
-        <span class="text-[10px] text-[#4e5058]">Enter 发送 · Shift+Enter 换行 · @ 提及成员 · Ctrl+V 添加图片预览</span>
+        <span class="composer-hint" title="Enter 发送 · Shift+Enter 换行 · @ 提及成员 · Ctrl+V 添加图片">Enter 发送 · Shift+Enter 换行</span>
         <span v-if="messages.length > 0" class="text-[10px] text-[#4e5058]">{{ messages.length }} 条消息</span>
       </div>
     </div>

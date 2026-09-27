@@ -268,3 +268,32 @@ npx tauri dev
 ```
 
 如果这些都正常，说明核心链路基本没有被破坏。
+
+## 13. 只有某一位成员会把其他人的声音回传
+
+典型表现是：该成员自己说话没有回声，但其他成员一说话，声音会延迟后从他的麦克风轨道返回。
+这通常不是 LiveKit 服务端重复转发，而是该成员的输入端重新采集了远端播放声。
+
+按以下顺序隔离：
+
+```text
+1. 让该成员临时戴耳机，或把扬声器音量降到 0。
+   回声立即消失：属于扬声器到麦克风的声学回授。
+2. 在设置中心把“麦克风处理模式”切到“浏览器增强”。
+   该链路启用 echoCancellation；Rust PCM 注入链路没有远端播放参考，RNNoise 不能替代 AEC。
+3. 检查输入设备，避免选择“立体声混音 / Stereo Mix / What U Hear / 虚拟回放 / CABLE Output”等回放型输入。
+4. 关闭麦克风耳返，并确认没有共享 DoNiChannel 自身的应用音频。
+```
+
+9001/9002 端口只位于该成员自己的 `127.0.0.1`：
+
+```powershell
+Get-NetTCPConnection -State Listen -LocalPort 9001,9002 |
+    Select-Object LocalAddress, LocalPort, OwningProcess
+
+Get-Process -Id <OwningProcess>
+```
+
+`9001` 是应用音频共享，`9002` 是 Rust 麦克风。端口被旧客户端占用通常导致无法开麦、音源错乱或连接到残留服务，
+不是声学回声的直接原因。当前版本会在 WebSocket 建立后校验桌面进程实例；如果占用者不是当前客户端，连接会被拒绝并提示端口冲突，
+不会继续发布来自旧进程的 PCM。

@@ -2,6 +2,11 @@ use crate::audio::engine::{self, AudioDeviceInfo};
 use crate::state::AppState;
 
 #[tauri::command]
+pub(crate) fn get_local_audio_instance_id(state: tauri::State<'_, AppState>) -> String {
+    state.local_audio_instance_id.clone()
+}
+
+#[tauri::command]
 pub(crate) fn list_capture_devices() -> Result<Vec<AudioDeviceInfo>, String> {
     engine::list_capture_devices()
 }

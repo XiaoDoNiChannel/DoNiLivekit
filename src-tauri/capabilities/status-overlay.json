@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "status-overlay",
+  "description": "Status window event transport; media and window actions use scoped Rust commands.",
+  "windows": ["status-overlay"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-start-resize-dragging"]
+}

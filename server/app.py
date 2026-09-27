@@ -64,9 +64,11 @@ from .db.connection import connect
 from .db import chat as chat_repository
 from .db import profiles as profile_repository
 from .db import rooms as room_repository
+from .db import parties as party_repository
 from .db.migrations import migrate_database
 from .lifespan import create_lifespan
-from .livekit.client import list_rooms_and_participants
+from .livekit.client import list_rooms_and_participants, ensure_room_empty
+from .realtime.workspace import execute as execute_workspace_command
 from .livekit.tokens import build_room_token
 from .models.requests import ProfileUpdate, RoomAction
 from .realtime.hub import send_payload
@@ -312,6 +314,7 @@ class PresenceManager:
         self.active_connections: Dict[str, PresenceConnection] = {}
         self.participants: Dict[str, PresenceParticipant] = {}
         self.lock = asyncio.Lock()
+        self.workspace_results = {}
 
     def _next_seq_locked(self) -> int:
         self.seq += 1
@@ -327,6 +330,7 @@ class PresenceManager:
     def build_snapshot(self) -> dict:
         """构建完整 Presence 快照（含头像字段）。"""
         room_names = get_all_rooms_from_db()
+        metadata = room_repository.room_metadata(DB_PATH)
 
         channels = []
         for room_name in room_names:
@@ -350,6 +354,8 @@ class PresenceManager:
                     "id": room_name,
                     "name": room_name,
                     "type": "voice",
+                    "isLobby": metadata.get(room_name, {}).get('isLobby', False),
+                    "displayName": '主大厅' if metadata.get(room_name, {}).get('isLobby') else room_name,
                     "members": members,
                 }
             )
@@ -375,6 +381,8 @@ class PresenceManager:
             "seq": self.seq,
             "channels": channels,
             "participants": participants,
+            "workspaceVersion": 1,
+            "partyCards": party_repository.snapshot(DB_PATH),
         }
 
     async def connect(
@@ -577,10 +585,9 @@ class PresenceManager:
         """把用户移动到指定语音频道。"""
         clean_channel = (channel_id or "").strip() or None
 
-        if clean_channel is not None and clean_channel not in get_all_rooms_from_db():
-            raise ValueError(f"频道不存在: {clean_channel}")
-
         async with self.lock:
+            if clean_channel is not None and clean_channel not in get_all_rooms_from_db():
+                raise ValueError(f"频道不存在: {clean_channel}")
             participant = self.participants.get(identity)
             if not participant:
                 raise ValueError(f"Presence 用户不存在: {identity}")
@@ -1097,6 +1104,9 @@ async def get_token(
     identity: Optional[str] = None,
 ):
     """获取 LiveKit token。"""
+    metadata = room_repository.room_metadata(DB_PATH).get(room)
+    if metadata and metadata['deleted']:
+        raise HTTPException(status_code=410, detail='频道已删除，请刷新频道列表')
     token_jwt = build_token(user_name=user, room_name=room, identity=identity)
     return {"token": token_jwt, "room": room}
 
@@ -1110,6 +1120,7 @@ async def get_rooms():
     新客户端实时成员状态走 Presence WebSocket。
     """
     db_rooms = get_all_rooms_from_db()
+    metadata = room_repository.room_metadata(DB_PATH)
     livekit_map = {}
 
     try:
@@ -1120,6 +1131,8 @@ async def get_rooms():
     merged_names = []
     seen = set()
     for name in db_rooms + list(livekit_map.keys()):
+        if metadata.get(name, {}).get('deleted'):
+            continue
         if name in seen:
             continue
         seen.add(name)
@@ -1129,6 +1142,7 @@ async def get_rooms():
         {
             "name": name,
             "participants": livekit_map.get(name, []),
+            "isLobby": metadata.get(name, {}).get('isLobby', False),
         }
         for name in merged_names
     ]
@@ -1147,7 +1161,10 @@ async def create_room(body: RoomAction = Body(default_factory=RoomAction)):
     if len(room_name) > 64:
         raise HTTPException(status_code=400, detail="房间名过长，最多 64 个字符")
 
-    add_room_to_db(room_name)
+    try:
+        add_room_to_db(room_name)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     await presence_manager.broadcast_room_created(room_name)
     return {"ok": True, "name": room_name}
 
@@ -1639,6 +1656,13 @@ async def presence_websocket(websocket: WebSocket):
                     websocket,
                     generation,
                 )
+
+            elif message_type == "workspace_command":
+                result = await execute_workspace_command(
+                    presence_manager, DB_PATH, identity, websocket, generation, message,
+                    lambda name: ensure_room_empty(LIVEKIT_URL, API_KEY, API_SECRET, name),
+                )
+                await presence_manager.send_to(identity, result, websocket, generation)
 
             elif message_type == "join_channel":
                 channel_id = message.get("channelId")

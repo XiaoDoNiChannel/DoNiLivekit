@@ -1,12 +1,31 @@
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
+from contextlib import closing
 from pathlib import Path
 
 from server.db.migrations import LATEST_SCHEMA_VERSION, migrate_database
 
 
 class MigrationTests(unittest.TestCase):
+    def test_version_three_upgrade_keeps_ids_and_channel_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'v3.db'
+            with patch('server.db.migrations.LATEST_SCHEMA_VERSION', 3):
+                migrate_database(path, ['day0', '自定义频道'])
+            with closing(sqlite3.connect(path)) as db, db:
+                before = db.execute('SELECT id,room_name FROM rooms').fetchall()
+                db.execute("INSERT INTO chat_messages(id,channel_id,sender_id,sender_name,content,timestamp) VALUES('keep','day0','u','U','old history',1)")
+            version, backup = migrate_database(path, ['different-default'])
+            self.assertEqual(version, 4)
+            self.assertTrue(backup.is_file())
+            with closing(sqlite3.connect(path)) as db:
+                self.assertEqual(db.execute('SELECT id,room_name FROM rooms').fetchall(), before)
+                self.assertEqual(db.execute('SELECT room_name FROM rooms WHERE is_lobby=1').fetchone()[0], 'day0')
+                self.assertEqual(db.execute('SELECT content FROM chat_messages').fetchone()[0], 'old history')
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM party_cards').fetchone()[0], 0)
+
     def test_legacy_database_is_backed_up_migrated_and_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "rooms.db"

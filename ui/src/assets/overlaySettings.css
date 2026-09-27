@@ -1,0 +1,28 @@
+.overlay-settings { color: var(--dc-text-normal); }
+.overlay-preview { max-width: 340px; padding: 14px; margin: 16px 0; color: var(--overlay-text); background: rgba(var(--overlay-surface-rgb), var(--overlay-opacity, .7)); border: 1px solid #ffffff22; border-radius: var(--overlay-radius); font-size: 12px; }
+.overlay-preview > div { display: flex; justify-content: space-between; gap: 12px; }
+.overlay-preview span { color: var(--overlay-muted); margin-left: 12px; font-size: 11px; }
+.overlay-preview p { margin-top: 10px; }
+.overlay-preview-speaker { color: var(--overlay-good); }
+.overlay-preview-speaker i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.overlay-setting-status { margin: 12px 0; font-size: 12px; color: var(--dc-text-muted); }
+.overlay-setting-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 20px; }
+.overlay-settings button { padding: 8px 10px; border: 1px solid var(--dc-border-subtle); border-radius: 6px; color: var(--dc-text-main); background: var(--dc-accent-soft); cursor: pointer; font-size: 12px; }
+.overlay-settings button:disabled, .overlay-settings input:disabled { opacity: .45; cursor: not-allowed; }
+.overlay-opacity-label { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; margin: 16px 0 12px; }
+.overlay-opacity-label strong { margin-left: auto; }
+.overlay-opacity-label input { width: 100%; accent-color: var(--dc-accent); }
+.overlay-shortcuts { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin: 20px 0 12px; font-size: 12px; }
+.overlay-shortcuts label { min-width: 0; }
+.overlay-shortcuts input { box-sizing: border-box; width: 100%; margin: 7px 0 0; padding: 9px; background: var(--dc-bg-input, #18191c); border: 1px solid var(--dc-border-subtle); border-radius: 6px; color: var(--dc-text-main); }
+.overlay-shortcuts button { justify-self: start; }
+.overlay-setting-error { color: var(--dc-warning, #ffcb75); overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; margin-top: 10px; }
+@media (max-width: 680px) { .overlay-shortcuts { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 860px) {
+  .settings-center-layout { grid-template-rows: auto minmax(0, 1fr); }
+  .settings-nav { padding: 8px; gap: 4px; }
+  .settings-nav-item { min-width: 0; padding: 9px 6px; gap: 5px; }
+  .settings-nav-desc { display: none; }
+  .settings-nav-title { font-size: 12px; }
+  .settings-nav-icon { width: 25px; height: 25px; }
+}

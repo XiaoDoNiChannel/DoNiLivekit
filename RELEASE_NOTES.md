@@ -1,3 +1,3 @@
-# DoNiChannel 0.1.2
+# DoNiChannel 0.1.3
 
-- R01：Chat 的超时没有覆盖真正的连接等待
+- 更新了UI界面，增加了一些小组件

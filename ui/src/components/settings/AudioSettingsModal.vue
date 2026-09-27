@@ -1,23 +1,29 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import ProfileSettingsPanel from './ProfileSettingsPanel.vue';
+import OverlaySettingsPanel from './OverlaySettingsPanel.vue';
 import { themes, themeStore, setTheme } from '../../stores/themeStore.js';
+import { appStore } from '../../stores/appStore.js';
+import { isTauriClient } from '../../shared/tauri.js';
 
 const props = defineProps({
+  initialTab: { type: String, default: 'profile' },
   open: {
     type: Boolean,
     default: false,
   },
 });
 
-const emit = defineEmits(['close', 'switch-mic', 'switch-output']);
+const emit = defineEmits(['close', 'switch-mic', 'switch-mic-source', 'switch-output', 'overlay-control', 'overlay-preferences']);
 
 const activeTab = ref('profile');
+watch(() => props.open, open => { if (open) activeTab.value = props.initialTab; });
 
 const settingsTabs = [
   { id: 'profile', icon: '👤', title: '我的资料', desc: '头像、昵称、状态' },
   { id: 'devices', icon: '🎧', title: '音频设备', desc: '麦克风与扬声器' },
   { id: 'mic', icon: '🎙️', title: '麦克风处理', desc: '阈值、增益、降噪' },
+  { id: 'overlay', icon: '▣', title: '游戏浮窗', desc: '状态、透明度、快捷键' },
   { id: 'about', icon: 'ℹ️', title: '关于', desc: '版本和使用建议' },
 ];
 
@@ -87,7 +93,18 @@ function chooseTheme(themeId) {
 
             <section v-show="activeTab === 'devices'" class="settings-section settings-page-section">
               <div class="settings-section-title">输入 / 输出设备</div>
-              <p class="settings-section-desc">选择当前使用的麦克风和扬声器。Tauri 模式下麦克风由 Rust 侧采集。</p>
+              <p class="settings-section-desc">选择当前使用的麦克风、处理模式和扬声器。</p>
+
+              <label v-if="isTauriClient" class="settings-field modern-settings-field">
+                <span>麦克风处理模式</span>
+                <select
+                  :value="appStore.media.micSource"
+                  @change="$emit('switch-mic-source', $event.target.value)"
+                >
+                  <option value="browser">浏览器增强（推荐外放，带回声消除）</option>
+                  <option value="rust">Rust 增强（推荐耳机，无回声消除）</option>
+                </select>
+              </label>
 
               <label class="settings-field modern-settings-field">
                 <span>麦克风</span>
@@ -113,15 +130,19 @@ function chooseTheme(themeId) {
 
               <div class="settings-tip-card">
                 <strong>提示</strong>
-                <span>如果设备列表不完整，先进入语音频道并允许音频权限，再重新打开设置中心。</span>
+                <span>别人说话出现回音时，请先选“浏览器增强”，并确认麦克风不是“立体声混音/虚拟回放”设备。</span>
               </div>
             </section>
 
             <section v-show="activeTab === 'mic'" class="settings-section settings-page-section">
-              <div class="settings-section-title">Rust 麦克风处理</div>
-              <p class="settings-section-desc">调整静音门限和麦克风增益。增益过高可能导致炸麦，建议先从默认值开始微调。</p>
+              <div class="settings-section-title">麦克风处理</div>
+              <p class="settings-section-desc">
+                {{ appStore.media.micSource === 'rust'
+                  ? '调整 Rust 静音门限和麦克风增益。增益过高可能导致炸麦。'
+                  : '浏览器增强模式由 WebRTC 提供回声消除、降噪和自动增益。' }}
+              </p>
 
-              <div id="vad-module" class="vad-container settings-vad-block modern-vad-block">
+              <div v-show="appStore.media.micSource === 'rust'" id="vad-module" class="vad-container settings-vad-block modern-vad-block">
                 <div class="vad-header">
                   <span>收音阈值</span>
                   <span id="vad-threshold-text">20%</span>
@@ -158,7 +179,14 @@ function chooseTheme(themeId) {
 
                 <div class="settings-range-note">增益越高声音越大，但也更容易触发限幅和失真。</div>
               </div>
+
+              <div v-show="appStore.media.micSource !== 'rust'" class="settings-tip-card">
+                <strong>浏览器增强已启用</strong>
+                <span>此模式优先解决外放回声；Rust 的 VAD、RNNoise 和增益滑块不会作用于该链路。</span>
+              </div>
             </section>
+
+            <OverlaySettingsPanel v-show="activeTab === 'overlay'" @control="action => emit('overlay-control', action)" @preferences="value => emit('overlay-preferences', value)" />
 
             <section v-show="activeTab === 'about'" class="settings-section settings-page-section settings-about-section">
               <div class="settings-section-title">关于 DoNiChannel</div>

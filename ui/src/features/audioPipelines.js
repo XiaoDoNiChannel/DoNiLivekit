@@ -36,13 +36,29 @@ function closeSocket(socket) {
     }
 }
 
-async function waitForWebSocketOpen(socket, wsUrl, label) {
+export function validatePcmServiceHello(message, expectedService, expectedInstanceId) {
+    if (!message || message.type !== 'pcm_service_hello') {
+        throw new Error('本地 PCM 服务未返回当前版本的身份信息，端口可能被旧客户端或其他程序占用');
+    }
+    if (message.protocolVersion !== 1) {
+        throw new Error(`本地 PCM 协议版本不匹配：${message.protocolVersion ?? 'unknown'}`);
+    }
+    if (message.service !== expectedService) {
+        throw new Error(`本地 PCM 服务类型不匹配：期望 ${expectedService}，实际 ${message.service || 'unknown'}`);
+    }
+    if (String(message.instanceId || '') !== String(expectedInstanceId || '')) {
+        throw new Error('本地音频端口被另一个客户端进程占用，已拒绝连接以避免采集源错乱');
+    }
+    return true;
+}
+
+async function waitForPcmServiceHandshake(socket, wsUrl, label, expectedService, expectedInstanceId) {
     await new Promise((resolve, reject) => {
         let settled = false;
         const timer = setTimeout(() => {
             if (settled) return;
             settled = true;
-            reject(new Error(`${label} WebSocket 连接超时：${wsUrl}。请检查 Rust 后端对应端口是否已启动。`));
+            reject(new Error(`${label} 身份握手超时：${wsUrl}。端口可能被旧客户端或其他程序占用。`));
         }, 2000);
 
         const fail = (error) => {
@@ -53,15 +69,33 @@ async function waitForWebSocketOpen(socket, wsUrl, label) {
         };
 
         socket.onopen = () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
             console.log(`[${label} WS] 已连接`, wsUrl);
-            resolve();
+        };
+
+        socket.onmessage = (event) => {
+            if (settled) return;
+            try {
+                if (typeof event.data !== 'string') {
+                    throw new Error('本地 PCM 服务在身份握手前发送了音频数据');
+                }
+                const message = JSON.parse(event.data);
+                validatePcmServiceHello(message, expectedService, expectedInstanceId);
+                socket.send(JSON.stringify({
+                    type: 'pcm_service_ack',
+                    service: expectedService,
+                    instanceId: String(expectedInstanceId),
+                    protocolVersion: 1,
+                }));
+                settled = true;
+                clearTimeout(timer);
+                resolve();
+            } catch (error) {
+                fail(error);
+            }
         };
 
         socket.onerror = () => {
-            fail(new Error(`${label} WebSocket 连接失败：${wsUrl}。请检查 9001/9002 端口是否被占用或未启动。`));
+            fail(new Error(`${label} WebSocket 连接失败：${wsUrl}。请检查本地端口是否被占用或服务未启动。`));
         };
 
         socket.onclose = () => {
@@ -131,11 +165,20 @@ function bindPcmSocketToWorklet(socket, workletNode, label) {
     };
 }
 
-export function createAudioPipelinesFeature() {
+export function createAudioPipelinesFeature(context = {}) {
     // 9001 应用音频共享管线状态。
     let localPcmAudioContext = null;
     let localPcmWorkletNode = null;
     let localPcmDestination = null;
+    let localPcmSendGain = null;
+    let appAudioSendGain = 1;
+    function setAppAudioSendGain(value) {
+        const number = Number(value);
+        if (!Number.isFinite(number)) return appAudioSendGain;
+        appAudioSendGain = Math.max(0, Math.min(3, number));
+        if (localPcmSendGain) localPcmSendGain.gain.value = appAudioSendGain;
+        return appAudioSendGain;
+    }
     let localPcmTrack = null;
     let localPcmSocket = null;
     let isLocalPcmPipelineReady = false;
@@ -189,6 +232,10 @@ export function createAudioPipelinesFeature() {
         }
 
         try {
+            const expectedInstanceId = await context.invoke?.('get_local_audio_instance_id');
+            if (!expectedInstanceId) {
+                throw new Error('无法读取当前客户端的本地音频实例标识');
+            }
             localRustMicAudioContext = new Ctx({ sampleRate: resolvedSampleRate });
             await localRustMicAudioContext.audioWorklet.addModule('./pcm-worker.js');
 
@@ -223,7 +270,13 @@ export function createAudioPipelinesFeature() {
             localRustMicSocket.binaryType = 'arraybuffer';
 
             try {
-                await waitForWebSocketOpen(localRustMicSocket, wsUrl, 'Rust PCM');
+                await waitForPcmServiceHandshake(
+                    localRustMicSocket,
+                    wsUrl,
+                    'Rust PCM',
+                    'microphone',
+                    expectedInstanceId,
+                );
             } catch (error) {
                 logError('audioPipelines/rustMic WebSocket 初始化失败', error);
                 teardownRustMicPipeline();
@@ -305,6 +358,10 @@ export function createAudioPipelinesFeature() {
         }
 
         try {
+            const expectedInstanceId = await context.invoke?.('get_local_audio_instance_id');
+            if (!expectedInstanceId) {
+                throw new Error('无法读取当前客户端的本地音频实例标识');
+            }
             localPcmAudioContext = new Ctx({ sampleRate: resolvedSampleRate });
             await localPcmAudioContext.audioWorklet.addModule('./pcm-worker.js');
 
@@ -322,7 +379,10 @@ export function createAudioPipelinesFeature() {
             });
 
             localPcmDestination = localPcmAudioContext.createMediaStreamDestination();
-            localPcmWorkletNode.connect(localPcmDestination);
+            localPcmSendGain = localPcmAudioContext.createGain();
+            localPcmSendGain.gain.value = appAudioSendGain;
+            localPcmWorkletNode.connect(localPcmSendGain);
+            localPcmSendGain.connect(localPcmDestination);
             // 调试监听可临时打开：localPcmWorkletNode.connect(localPcmAudioContext.destination);
 
             const tracks = localPcmDestination.stream.getAudioTracks();
@@ -332,7 +392,13 @@ export function createAudioPipelinesFeature() {
             localPcmSocket.binaryType = 'arraybuffer';
 
             try {
-                await waitForWebSocketOpen(localPcmSocket, wsUrl, 'PCM');
+                await waitForPcmServiceHandshake(
+                    localPcmSocket,
+                    wsUrl,
+                    'PCM',
+                    'process_audio',
+                    expectedInstanceId,
+                );
             } catch (error) {
                 logError('audioPipelines/appAudio WebSocket 初始化失败', error);
                 teardownLocalPcmPipeline();
@@ -376,6 +442,8 @@ export function createAudioPipelinesFeature() {
             localPcmWorkletNode = null;
         }
 
+        if (localPcmSendGain) { try { localPcmSendGain.disconnect(); } catch (_) {} }
+        localPcmSendGain = null;
         localPcmDestination = null;
 
         if (localPcmAudioContext) {
@@ -401,6 +469,7 @@ export function createAudioPipelinesFeature() {
     }
 
     return {
+        setAppAudioSendGain,
         initRustMicPipeline,
         teardownRustMicPipeline,
         initLocalPcmPipeline,
