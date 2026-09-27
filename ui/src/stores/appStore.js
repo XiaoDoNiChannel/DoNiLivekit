@@ -20,12 +20,19 @@ export const appStore = reactive({
     media: {
         micOn: false,
         rustMicOn: false,
-        micSource: 'rust',
+        micSource: localStorage.getItem('lk_mic_source') === 'browser' ? 'browser' : 'rust',
         micMonitorOn: false,
         screenOn: false,
         appAudioSharing: false,
+        appAudioGain: Math.min(3, Math.max(0, Number(localStorage.getItem('lk_app_audio_gain') ?? 1) || 0)),
+        micLevel: 0,
+        micThreshold: Number(localStorage.getItem('lk_vad_threshold') ?? 20),
+        micBoost: Number(localStorage.getItem('lk_mic_boost') ?? 5),
     },
     devices: {
+        micOptions: [],
+        audioOutputOptions: [{ id: 'default', label: '默认扬声器' }],
+        audioOutputUnavailable: false,
         selectedRustMicId: localStorage.getItem('lk_rust_mic_device_id') || '',
         selectedBrowserMicId: localStorage.getItem('lk_mic') || '',
         selectedAudioOutputId: localStorage.getItem('lk_audio_output') || 'default',
@@ -65,7 +72,7 @@ export function syncFromRuntimeSnapshot(snapshot = {}) {
             username: snapshot.username ?? appStore.connection.username,
             isInLobby: snapshot.isInLobby ?? appStore.connection.isInLobby,
             isConnected: snapshot.isConnected ?? appStore.connection.isConnected,
-            currentChannel: snapshot.currentChannel ?? appStore.connection.currentChannel,
+            currentChannel: 'currentChannel' in snapshot ? snapshot.currentChannel : appStore.connection.currentChannel,
             channels: Array.isArray(snapshot.channels) ? snapshot.channels : appStore.connection.channels,
         });
     }

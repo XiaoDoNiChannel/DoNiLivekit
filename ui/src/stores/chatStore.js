@@ -336,6 +336,16 @@ export function getTotalMentionCount() {
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
 
+/** Leave the active chat without deleting its saved history. */
+export function deactivateChatChannel() {
+  if (chatStore.currentChannelId) {
+    persistCurrentChannel();
+    chatStore._cache[chatStore.currentChannelId] = [...chatStore.messages];
+  }
+  chatStore.currentChannelId = null;
+  chatStore.messages = [];
+}
+
 export function switchChatChannel(channelId) {
   const cleanId = normalizeChannelId(channelId);
 

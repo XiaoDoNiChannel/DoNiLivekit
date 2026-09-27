@@ -13,6 +13,7 @@ export function createRemoteAudioFeature(context) {
         const remoteAudioContext = context.getRemoteAudioContext();
         if (!remoteAudioContext) {
             audioEl.volume = Math.max(0, Math.min(gain, 1));
+            audioEl.muted = false;
             return;
         }
 
@@ -29,10 +30,12 @@ export function createRemoteAudioFeature(context) {
             audioEl.__gainNode = gainNode;
             audioEl.__streamSource = streamSource;
             audioEl.__trackSid = track.sid;
+            audioEl.__playbackEnabled = true;
             gainNode.gain.value = gain;
         } catch (e) {
             logError('remoteAudio/addRemoteGainNode 创建 GainNode 路由失败，回退到 audio.volume', e, 'warn');
             audioEl.volume = Math.max(0, Math.min(gain, 1));
+            audioEl.muted = false;
             return;
         }
 
@@ -79,7 +82,7 @@ export function createRemoteAudioFeature(context) {
         const gain = volumes[source];
         const gains = remoteAudioGainNodes[key] || [];
         gains.forEach((audioEl) => {
-            if (audioEl.__gainNode) audioEl.__gainNode.gain.value = gain;
+            if (audioEl.__gainNode) audioEl.__gainNode.gain.value = audioEl.__playbackEnabled === false ? 0 : gain;
         });
 
         // 兜底：如果 GainNode 路由不可用，仍然修改原生 audio 元素音量。
@@ -91,6 +94,15 @@ export function createRemoteAudioFeature(context) {
     }
 
     return {
+        setTrackEnabled(trackSid, enabled) {
+            document.querySelectorAll('[data-audio-track-sid]').forEach(el => {
+                if (el.dataset.audioTrackSid !== trackSid) return;
+                el.__playbackEnabled = enabled;
+                const volumes = context.ensureParticipantVolumeState(el.dataset.audioIdentity);
+                if (el.__gainNode) el.__gainNode.gain.value = enabled ? (volumes[el.dataset.audioSource] ?? 1) : 0;
+                else el.muted = !enabled;
+            });
+        },
         addRemoteGainNode,
         clearRemoteGainNodes,
         removeRemoteAudioRouteByTrackSid,

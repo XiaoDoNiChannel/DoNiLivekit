@@ -68,6 +68,9 @@ Windows 麦克风设备
 9002 的每个 10ms 帧还会先发送一条 `pcm_frame_meta` 文本消息，包含 `seq`、
 `capturedAtMicros` 和 `discontinuity`。PCM 二进制格式保持 Float32 不变。
 
+9001/9002 WebSocket 在传输 PCM 前会交换 `pcm_service_hello` / `pcm_service_ack`。
+握手同时校验服务类型、协议版本和当前桌面进程实例，避免端口被旧客户端占用时前端误连到残留音频服务。
+
 相关模块：
 
 ```text

@@ -1,108 +1,20 @@
-import { alertError, logError } from '../shared/errors.js';
+import { publicationKind } from './shareSubscriptions.js';
+import { logError } from '../shared/errors.js';
 
 /** 创建 LiveKit 事件模块；集中绑定远端 Track、成员和 DataChannel 事件。 */
 export function createLivekitEventsFeature(context) {
-    const localScreenControls = {};
-    let clickTimer = null;
-
-    /** 判断 publication 是否为屏幕共享视频源。 */
-    function isScreenShareSource(source) {
-        return source === context.LivekitClient.Track.Source.ScreenShare || source === 'screen_share';
-    }
-
-    /** 判断音频 track 是否为 Rust 9001 发布的应用/进程音频。 */
-    function isAppAudioPublication(track, publication) {
-        const normalize = (value) => String(value || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
-        const text = [
-            publication?.trackName,
-            publication?.name,
-            publication?.track?.name,
-            publication?.track?.mediaStreamTrack?.label,
-            track?.name,
-            track?.mediaStreamTrack?.label,
-            publication?.source,
-        ].map(normalize).filter(Boolean).join('|');
-
-        return [
-            'app-audio',
-            'appaudio',
-            'application-audio',
-            'system-audio',
-            'process-audio',
-            'window-audio',
-        ].some((keyword) => text.includes(keyword));
-    }
-
-    function getAudioPublicationSource(track, publication) {
-        if (isAppAudioPublication(track, publication)) return 'appaudio';
-        if (track?.source === context.LivekitClient.Track.Source.ScreenShareAudio
-            || track?.source === 'screen_share_audio'
-            || publication?.source === context.LivekitClient.Track.Source.ScreenShareAudio
-            || publication?.source === 'screen_share_audio') {
-            return 'screen';
-        }
-        return 'mic';
-    }
-
-    function removeAudioElementsForPublication(publication, participant) {
-        const identity = participant?.identity || publication?.participant?.identity || '';
-        const source = getAudioPublicationSource(publication?.track, publication);
-        const trackSid = publication?.trackSid || publication?.sid || publication?.track?.sid || '';
-
-        document.querySelectorAll('[data-audio-identity]').forEach((el) => {
-            const sameIdentity = !identity || el?.dataset?.audioIdentity === identity;
-            const sameSource = !source || el?.dataset?.audioSource === source;
-            const sameTrack = !trackSid || el?.dataset?.audioTrackSid === trackSid;
-            if (sameIdentity && (sameTrack || sameSource)) el.remove();
+    const isScreenShareSource = source => source === 'screen_share';
+    const isAppAudioPublication = (track, pub) => publicationKind(pub, track) === 'appaudio';
+    const getAudioPublicationSource = (track, pub) => publicationKind(pub, track);
+    const clearLocalScreenControls = () => context.shares.reset();
+    function removeAudioElementsForPublication(pub, participant) {
+        document.querySelectorAll('[data-audio-track-sid]').forEach(el => {
+            if (el.dataset.audioTrackSid === pub.trackSid && el.dataset.audioIdentity === participant.identity) el.remove();
         });
     }
-
-    function removeLocalScreenRestoreCard(identity) {
-        const card = document.getElementById(`screen-restore-${identity}`);
-        if (card) card.remove();
-    }
-
-    function upsertLocalScreenRestoreCard(identity, displayName) {
-        let card = document.getElementById(`screen-restore-${identity}`);
-        if (!card) {
-            card = document.createElement('div');
-            card.className = 'screen-restore-card';
-            card.id = `screen-restore-${identity}`;
-            document.getElementById('video-container')?.appendChild(card);
-        }
-
-        card.innerHTML = `
-            <div>${displayName} 的屏幕已在本地屏蔽</div>
-            <button onclick="toggleLocalScreenSubscription('${identity}')">恢复屏幕</button>
-        `;
-    }
-
-    /** 本地屏蔽/恢复某个远端屏幕共享，不影响其他成员订阅。 */
-    async function toggleLocalScreenSubscription(identity) {
-        const state = localScreenControls[identity];
-        if (!state || !state.publication) return;
-
-        try {
-            if (!state.isBlocked) {
-                await state.publication.setSubscribed(false);
-                state.isBlocked = true;
-                upsertLocalScreenRestoreCard(identity, state.displayName || identity);
-            } else {
-                await state.publication.setSubscribed(true);
-                state.isBlocked = false;
-                removeLocalScreenRestoreCard(identity);
-            }
-        } catch (e) {
-            logError('livekitEvents/toggleLocalScreenSubscription 切换本地屏幕订阅状态失败', e);
-            alertError('切换本地屏幕订阅状态失败', e);
-        }
-    }
-
-    function clearLocalScreenControls() {
-        Object.keys(localScreenControls).forEach((identity) => {
-            removeLocalScreenRestoreCard(identity);
-            delete localScreenControls[identity];
-        });
+    function toggleLocalScreenSubscription(identity) {
+        const share = context.shares;
+        share.stopWatching();
     }
 
     function getUniqueRoomEvents(...eventNames) {
@@ -154,77 +66,28 @@ export function createLivekitEventsFeature(context) {
     /** 给当前 LiveKit Room 绑定事件；每次新建 Room 后必须调用一次。 */
     function registerRoomEvents(room) {
         if (!room) return;
+        context.shares.attach(room);
 
         room.on(context.LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+            if (!context.shares.isCurrentRoom(room)) return;
+            if (!context.shares.allowTrack(publication, participant, track)) {
+                publication.setSubscribed(false);
+                return;
+            }
+            context.shares.subscribed(publication, participant, true);
             if (track.kind === 'video') {
-                const isRemoteScreen = isScreenShareSource(publication?.source) && participant?.identity !== room.localParticipant?.identity;
-                const videoEl = track.attach();
-
                 const wrapper = document.createElement('div');
                 wrapper.className = 'video-wrapper';
                 wrapper.id = 'video-wrapper-' + track.sid;
                 wrapper.dataset.videoIdentity = participant.identity;
-                wrapper.title = '双击全屏放大观看';
-
-                const displayName = participant.name || participant.identity || '未知成员';
-
-                const nameLabel = document.createElement('div');
-                nameLabel.className = 'video-name-label';
-                nameLabel.innerText = `${displayName} 的屏幕`;
-
-                if (isRemoteScreen) {
-                    localScreenControls[participant.identity] = {
-                        publication,
-                        displayName,
-                        isBlocked: false,
-                    };
-
-                    removeLocalScreenRestoreCard(participant.identity);
-
-                    const toggleBtn = document.createElement('button');
-                    toggleBtn.className = 'screen-local-toggle-btn';
-                    toggleBtn.innerText = '屏蔽屏幕';
-                    toggleBtn.onclick = async (event) => {
-                        event.stopPropagation();
-                        await toggleLocalScreenSubscription(participant.identity);
-                    };
-                    wrapper.appendChild(toggleBtn);
-                }
-
-                wrapper.onclick = (e) => {
-                    if (e.target.tagName.toLowerCase() === 'button') return;
-                    if (clickTimer) clearTimeout(clickTimer);
-
-                    clickTimer = setTimeout(() => {
-                        const container = document.getElementById('video-container');
-                        const isAlreadyFocused = wrapper.classList.contains('focused');
-
-                        document.querySelectorAll('.video-wrapper.focused').forEach(el => {
-                            el.classList.remove('focused');
-                        });
-
-                        if (!isAlreadyFocused) {
-                            wrapper.classList.add('focused');
-                            container?.classList.add('has-focus');
-                        } else {
-                            container?.classList.remove('has-focus');
-                        }
-                    }, 250);
-                };
-
+                wrapper.dataset.shareId = `${participant.identity}:${publication.trackSid}`;
+                const video = track.attach();
+                video.muted = true;
+                wrapper.appendChild(video);
                 wrapper.ondblclick = () => {
-                    if (clickTimer) clearTimeout(clickTimer);
-
-                    if (!document.fullscreenElement) {
-                        if (wrapper.requestFullscreen) wrapper.requestFullscreen();
-                        else if (wrapper.webkitRequestFullscreen) wrapper.webkitRequestFullscreen();
-                    } else {
-                        if (document.exitFullscreen) document.exitFullscreen();
-                    }
+                    if (document.fullscreenElement) document.exitFullscreen?.();
+                    else wrapper.requestFullscreen?.();
                 };
-
-                wrapper.appendChild(videoEl);
-                wrapper.appendChild(nameLabel);
                 document.getElementById('video-container')?.appendChild(wrapper);
                 return;
             }
@@ -255,7 +118,9 @@ export function createLivekitEventsFeature(context) {
             }
         });
 
-        room.on(context.LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
+        room.on(context.LivekitClient.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+            if (!context.shares.isCurrentRoom(room)) return;
+            context.shares.subscribed(publication, participant, false);
             track.detach().forEach(element => element.remove());
             context.removeRemoteAudioRouteByTrackSid(track.sid);
 
@@ -268,15 +133,21 @@ export function createLivekitEventsFeature(context) {
         });
 
         room.on(context.LivekitClient.RoomEvent.ParticipantDisconnected, (participant) => {
-            document.querySelectorAll(`[data-video-identity="${participant.identity}"]`).forEach(el => el.remove());
-            document.querySelectorAll(`[data-audio-identity="${participant.identity}"]`).forEach(el => el.remove());
-            removeLocalScreenRestoreCard(participant.identity);
-            delete localScreenControls[participant.identity];
+            if (!context.shares.isCurrentRoom(room)) return;
+            document.querySelectorAll('[data-video-identity], [data-audio-identity]').forEach(el => {
+                if (el.dataset.videoIdentity === participant.identity || el.dataset.audioIdentity === participant.identity) {
+                    context.removeRemoteAudioRouteByTrackSid(el.dataset.audioTrackSid);
+                    el.remove();
+                }
+            });
+            context.shares.participantLeft(participant);
             context.updateParticipantList();
             context.onLivekitParticipantsChanged?.({ reason: 'participant_disconnected', participant, room });
         });
 
         room.on(context.LivekitClient.RoomEvent.ParticipantConnected, (participant) => {
+            if (!context.shares.isCurrentRoom(room)) return;
+            participant.trackPublications?.forEach(pub => context.shares.discover(pub, participant));
             context.updateParticipantList();
             context.onLivekitParticipantsChanged?.({ reason: 'participant_connected', participant, room });
         });
@@ -323,8 +194,9 @@ export function createLivekitEventsFeature(context) {
         });
 
         room.on(context.LivekitClient.RoomEvent.LocalTrackUnpublished, (pub) => {
+            if (!context.shares.isCurrentRoom(room)) return;
             if (isScreenShareSource(pub?.source)) {
-                context.hideLocalScreenPreview();
+                context.onLocalScreenStopped?.();
             }
             if (pub?.kind === 'audio') {
                 context.updateParticipantList();
@@ -332,8 +204,13 @@ export function createLivekitEventsFeature(context) {
             }
         });
 
-        room.on(context.LivekitClient.RoomEvent.TrackPublished, (pub) => { if (pub.kind === 'audio') context.updateParticipantList(); });
+        room.on(context.LivekitClient.RoomEvent.TrackPublished, (pub, participant) => {
+            if (!context.shares.isCurrentRoom(room)) return;
+            context.shares.discover(pub, participant);
+            context.updateParticipantList();
+        });
         room.on(context.LivekitClient.RoomEvent.TrackUnpublished, (pub, participant) => {
+            if (!context.shares.isCurrentRoom(room)) return;
             if (pub.kind === 'audio') {
                 removeAudioElementsForPublication(pub, participant);
                 context.removeRemoteAudioRouteByTrackSid(pub?.trackSid || pub?.track?.sid);
@@ -341,16 +218,7 @@ export function createLivekitEventsFeature(context) {
                 setTimeout(() => context.updateParticipantList(), 80);
             }
 
-            if (isScreenShareSource(pub?.source)) {
-                const identity = participant?.identity || Object.keys(localScreenControls).find(key => {
-                    return localScreenControls[key]?.publication?.trackSid === pub?.trackSid;
-                });
-
-                if (identity) {
-                    removeLocalScreenRestoreCard(identity);
-                    delete localScreenControls[identity];
-                }
-            }
+            context.shares.remove(pub, participant);
         });
 
         room.on(context.LivekitClient.RoomEvent.DataReceived, (payload, participant) => {
@@ -368,19 +236,31 @@ export function createLivekitEventsFeature(context) {
         // 但 Presence 频道成员状态不一定会自动重新 join。
         // 这里把“LiveKit 已稳定”通知 runtime，让 runtime 用当前频道重新校准 Presence。
         const RoomEvent = context.LivekitClient.RoomEvent || {};
+        onRoomEvents(room, [RoomEvent.TrackSubscriptionFailed], sid => context.shares.failed(sid));
         onRoomEvents(room, [RoomEvent.Reconnected, 'reconnected'], () => {
+            if (!context.shares.isCurrentRoom(room)) return;
+            context.shares.reconnected();
             notifyLiveKitStable(room, 'reconnected');
         });
         onRoomEvents(room, [RoomEvent.Connected, 'connected'], () => {
+            if (!context.shares.isCurrentRoom(room)) return;
+            context.shares.sync();
             notifyLiveKitStable(room, 'connected');
         });
         onRoomEvents(room, [RoomEvent.Reconnecting, 'reconnecting'], () => {
+            if (!context.shares.isCurrentRoom(room)) return;
+            context.shares.reconnecting();
             notifyLiveKitUnstable(room, 'reconnecting');
         });
         onRoomEvents(room, [RoomEvent.Disconnected, 'disconnected'], (reason) => {
+            if (!context.shares.isCurrentRoom(room)) return;
+            context.shares.reset();
+            context.clearRemoteAudio?.();
+            context.onLocalScreenStopped?.();
             notifyLiveKitUnstable(room, 'disconnected', { disconnectReason: reason });
         });
         onRoomEvents(room, [RoomEvent.ConnectionStateChanged, 'connectionStateChanged'], (state) => {
+            if (!context.shares.isCurrentRoom(room)) return;
             const normalized = normalizeConnectionState(state || room.state || room.connectionState);
             if (normalized === 'connected') {
                 notifyLiveKitStable(room, 'connection_state_connected', { state });
@@ -394,6 +274,7 @@ export function createLivekitEventsFeature(context) {
 
     return {
         registerRoomEvents,
+        syncSubscriptions: () => context.shares.sync(),
         toggleLocalScreenSubscription,
         clearLocalScreenControls,
         isScreenShareSource,

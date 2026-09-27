@@ -160,6 +160,8 @@ function normalizeChannel(channel) {
         id: id || name,
         name: name || id,
         type: channel.type || 'voice',
+        isLobby: !!channel.isLobby,
+        displayName: channel.displayName || name || id,
         members,
     };
 }

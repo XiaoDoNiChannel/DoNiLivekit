@@ -1,4 +1,5 @@
 import { alertError, getErrorMessage, logError } from '../shared/errors.js';
+import { appStore } from '../stores/appStore.js';
 
 /**
  * 返回适合显示的麦克风名称。
@@ -18,8 +19,8 @@ export function getCleanMicDeviceLabel(device, index) {
     return `麦克风 ${index + 1}`;
 }
 
-/** 刷新输入设备列表；Tauri 使用 Rust 枚举，浏览器使用 LiveKit 枚举。 */
-export async function updateMicList({ isTauriClient, invoke, LivekitClient }) {
+/** 刷新输入设备列表；Rust 模式走 WASAPI 枚举，浏览器 AEC 模式走 LiveKit 枚举。 */
+export async function updateMicList({ isTauriClient, useRustMic = isTauriClient, invoke, LivekitClient }) {
     const selectEl = document.getElementById('mic-select');
     if (!selectEl) return;
 
@@ -27,7 +28,7 @@ export async function updateMicList({ isTauriClient, invoke, LivekitClient }) {
         selectEl.disabled = false;
         selectEl.innerHTML = '';
 
-        if (isTauriClient) {
+        if (isTauriClient && useRustMic) {
             const devices = await invoke('list_capture_devices');
             const rows = Array.isArray(devices) ? devices : [];
 
@@ -77,6 +78,8 @@ export async function updateMicList({ isTauriClient, invoke, LivekitClient }) {
     } catch (e) {
         logError('devices/updateMicList 获取麦克风列表失败', e);
         selectEl.innerHTML = `<option value="">麦克风列表获取失败：${getErrorMessage(e)}</option>`;
+    } finally {
+        appStore.devices.micOptions = Array.from(selectEl.options).map(option => ({ id: option.value, label: option.text }));
     }
 }
 
@@ -84,6 +87,7 @@ export async function updateMicList({ isTauriClient, invoke, LivekitClient }) {
 export async function switchMic(deviceId, context) {
     const {
         isTauriClient,
+        useRustMic = isTauriClient,
         invoke,
         getRoom,
         isMicActive,
@@ -94,7 +98,7 @@ export async function switchMic(deviceId, context) {
         afterRustMicRestart,
     } = context;
 
-    if (isTauriClient) {
+    if (isTauriClient && useRustMic) {
         const normalized = deviceId || '';
         localStorage.setItem('lk_rust_mic_device_id', normalized);
 
@@ -166,9 +170,15 @@ export async function updateAudioOutputList({ selectedAudioOutputId, LivekitClie
     const selectEl = document.getElementById('audio-output-select');
     if (!selectEl) return;
 
+    function syncOutputOptions() {
+        appStore.devices.audioOutputOptions = Array.from(selectEl.options).map(option => ({ id: option.value, label: option.text }));
+        appStore.devices.audioOutputUnavailable = selectEl.disabled;
+    }
+
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== 'function') {
         selectEl.innerHTML = '<option value="default">当前 WebView 不支持输出设备切换</option>';
         selectEl.disabled = true;
+        syncOutputOptions();
         return;
     }
 
@@ -202,6 +212,7 @@ export async function updateAudioOutputList({ selectedAudioOutputId, LivekitClie
         selectEl.appendChild(defaultOption);
 
         outputs.forEach((device) => {
+            if (device.deviceId === 'default') return;
             const option = document.createElement('option');
             option.value = device.deviceId;
             option.text = device.label || `音频输出设备 (${device.deviceId.slice(0, 6)}...)`;
@@ -214,6 +225,9 @@ export async function updateAudioOutputList({ selectedAudioOutputId, LivekitClie
     } catch (e) {
         logError('devices/updateAudioOutputList 枚举音频输出设备失败', e, 'warn');
         selectEl.innerHTML = '<option value="default">输出设备不可用</option>';
+        selectEl.disabled = true;
+    } finally {
+        syncOutputOptions();
     }
 }
 

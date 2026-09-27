@@ -3,7 +3,8 @@ param(
     [string]$Version = "",
     [ValidateSet("github", "local", "")]
     [string]$Mode = "",
-    [switch]$SkipChecks
+    [switch]$SkipChecks,
+    [switch]$Resume
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +12,31 @@ $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $tauriConfigPath = Join-Path $projectRoot "src-tauri\tauri.conf.json"
 $tauriConfig = Get-Content -LiteralPath $tauriConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $currentVersion = [string]$tauriConfig.version
+. (Join-Path $PSScriptRoot 'Release-Git.ps1')
+
+if (-not $Resume -and [string]::IsNullOrWhiteSpace($Version) -and $Mode -ne 'local') {
+    Push-Location $projectRoot
+    try { $lastSubject = Invoke-ReleaseGit -Arguments @('log', '-1', '--format=%s') }
+    finally { Pop-Location }
+    if ($lastSubject.ExitCode -eq 0 -and $lastSubject.Lines[0] -eq "release: v$currentVersion") {
+        $choice = Read-Host "当前提交为 v$currentVersion。回车继续核对/推送此版本；输入 n 才创建新版本"
+        $Resume = $choice -notmatch '^(n|no)$'
+    }
+}
+
+if ($Resume) {
+    if ($Mode -eq 'local') { throw '-Resume 仅用于继续 GitHub 发布。' }
+    if ([string]::IsNullOrWhiteSpace($Version)) { $Version = $currentVersion }
+    $Version = $Version.Trim().TrimStart('v')
+    if ($Version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') { throw '版本号格式不正确。' }
+    Write-Host "继续发布 v$Version：只推送已有发布提交和标签，不修改版本、更新说明或提交工作区。" -ForegroundColor Cyan
+    Push-Location $projectRoot
+    try {
+        Publish-ReleaseCommit -Version $Version
+        Write-Host "v$Version 分支和标签已核对；请在 GitHub Actions 查看构建状态。" -ForegroundColor Green
+    } finally { Pop-Location }
+    return
+}
 
 function Write-Utf8NoBom {
     param(
@@ -99,7 +125,7 @@ function Invoke-CheckedCommand {
     Write-Host "`n==> $DisplayName" -ForegroundColor Cyan
     & $Command
     if ($LASTEXITCODE -ne 0) {
-        throw "$DisplayName 失败，退出码: $LASTEXITCODE。版本文件已修改，但尚未提交或发布。"
+        throw "$DisplayName 失败，退出码: $LASTEXITCODE。已完成的步骤不会回滚，请检查 git status 和 git log。"
     }
 }
 
@@ -171,9 +197,11 @@ try {
 
     Invoke-CheckedCommand "暂存发布内容" { git add -A }
     Invoke-CheckedCommand "创建发布提交" { git commit -m "release: v$Version" }
-    Invoke-CheckedCommand "推送当前分支" { git push origin HEAD }
-    Invoke-CheckedCommand "创建发布标签" { git tag -a "v$Version" -m "DoNiChannel v$Version" }
-    Invoke-CheckedCommand "推送发布标签" { git push origin "v$Version" }
+    try {
+        Publish-ReleaseCommit -Version $Version
+    } catch {
+        throw "发布提交已创建。可执行 .\scripts\Release-Client.ps1 -Resume -Version $Version 继续。详情：$_"
+    }
 
     Write-Host "`n客户端 v$Version 已触发 GitHub Actions 构建。" -ForegroundColor Green
     Write-Host "构建完成后下载 Draft Release 的 latest.json、更新安装包和对应 .sig，复制到中心服务器再运行 Publish-LanUpdate.ps1。"

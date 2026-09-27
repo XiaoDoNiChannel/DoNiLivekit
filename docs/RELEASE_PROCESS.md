@@ -43,6 +43,7 @@ GitHub Release 可访问性不是默认更新链路的前提。局域网服务�
 
 ## 失败处理
 
+- Git 推送出现 `RPC failed` / `remote end hung up unexpectedly`：响应断线时远端可能已经收到提交，不要直接重新升版本。执行 `.\scripts\Release-Client.ps1 -Resume -Version 0.1.2`（替换为本次版本），脚本核对远端分支/标签，重试未完成的推送；不会重新改版本、提交工作区或覆盖其他提交的标签。再次双击 `RELEASE_CLIENT.cmd` 时，若 HEAD 仍是当前版本的发布提交，默认会提示继续当前版本。
 - 版本不一致：工作流在构建前失败，修正三处版本后创建新 tag；不要移动已公开的 tag。
 - Secrets 缺失：不会生成可靠签名产物，补齐 Secrets 后重新运行失败的 workflow。
 - 局域网服务端只有 `latest.json` 没有 bundle：接口返回 204，避免把不可下载更新展示给客户端。

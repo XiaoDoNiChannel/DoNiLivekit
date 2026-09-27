@@ -12,6 +12,8 @@ pub(crate) struct AppState {
     pub(crate) mic_sessions: Arc<MicSessionManager>,
     pub(crate) mic_boost: Arc<Mutex<f32>>,
     pub(crate) selected_mic_device_id: Arc<Mutex<Option<String>>>,
+    /// 标识当前桌面进程拥有的本地 PCM 服务，用于阻止前端误连占用 9001/9002 的旧进程。
+    pub(crate) local_audio_instance_id: String,
 }
 
 impl AppState {
@@ -24,6 +26,7 @@ impl AppState {
             mic_sessions: Arc::new(MicSessionManager::new()),
             mic_boost: Arc::new(Mutex::new(5.0)),
             selected_mic_device_id: Arc::new(Mutex::new(None)),
+            local_audio_instance_id: std::process::id().to_string(),
         }
     }
 }

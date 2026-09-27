@@ -12,6 +12,7 @@ import { logError } from '../shared/errors.js';
 import { appStore, markAppBooted, syncFromRuntimeSnapshot, setLastError } from '../stores/appStore.js';
 import { profileStore, getConnectionId, syncProfileToServer } from '../stores/profileStore.js';
 import {
+    presenceStore,
     syncSpeakingIdentities,
     clearSpeakingIdentities,
     syncVoiceMemberAudioStates,
@@ -22,7 +23,7 @@ import {
     getAuthoritativeChannelMembers,
 } from '../stores/presenceStore.js';
 import { watch } from 'vue';
-import { chatStore, switchChatChannel, loadServerHistory, addChatMessage, markMessageSent, markMessageFailed, applyServerChatMessage, applyServerReactionUpdate, updateChatAvatars } from '../stores/chatStore.js';
+import { chatStore, switchChatChannel, deactivateChatChannel, loadServerHistory, addChatMessage, markMessageSent, markMessageFailed, applyServerChatMessage, applyServerReactionUpdate, updateChatAvatars } from '../stores/chatStore.js';
 import { setApiBase } from '../shared/apiClient.js';
 import {
     updateMicList as updateMicListFromModule,
@@ -39,6 +40,14 @@ import {
 } from '../features/participantVolumes.js';
 import { createAppAudioFeature } from '../features/appAudio.js';
 import { createScreenShareFeature } from '../features/screenShare.js';
+import { createShareSubscriptions } from '../features/shareSubscriptions.js';
+import { sharingStore } from '../stores/sharingStore.js';
+import { createDiagnosticsFeature } from '../features/diagnostics.js';
+import { diagnosticsStore } from '../stores/diagnosticsStore.js';
+import { overlayStore } from '../stores/overlayStore.js';
+import { themeStore } from '../stores/themeStore.js';
+import { buildOverlaySnapshot, createOverlayOwner } from '../features/overlayProtocol.js';
+import { createOverlayClient } from '../features/overlayClient.js';
 import { createChatFeature } from '../features/chat.js';
 import { createRemoteAudioFeature } from '../features/remoteAudio.js';
 import { createAudioPipelinesFeature } from '../features/audioPipelines.js';
@@ -47,6 +56,8 @@ import { createLivekitEventsFeature } from '../features/livekitEvents.js';
 import { createRustMicFeature } from '../features/rustMic.js';
 import { createRoomConnectionFeature } from '../features/roomConnection.js';
 import { createPresenceClient } from '../features/presenceClient.js';
+import { createWorkspaceFeature } from '../features/workspace.js';
+import { workspaceStore } from '../stores/workspaceStore.js';
 import { createChatClient } from '../features/chatClient.js';
 import { createAutoUpdateFeature } from '../features/autoUpdate.js';
 import { patchUpdateState, updateStore } from '../stores/updateStore.js';
@@ -65,7 +76,47 @@ const VAD_THRESHOLD_STORAGE_KEY = 'lk_vad_threshold';
 const MIC_BOOST_STORAGE_KEY = 'lk_mic_boost';
 
 const userVolumes = loadUserVolumesFromStorage();
-const audioPipelinesFeature = createAudioPipelinesFeature();
+const audioPipelinesFeature = createAudioPipelinesFeature({ invoke });
+audioPipelinesFeature.setAppAudioSendGain(appStore.media.appAudioGain);
+export function setAppAudioGain(value) {
+    const gain = audioPipelinesFeature.setAppAudioSendGain(Number(value) / 100);
+    appStore.media.appAudioGain = gain;
+    localStorage.setItem('lk_app_audio_gain', String(gain));
+}
+// The settings page owns the legacy slider bindings; both surfaces use those same actions.
+export function setQuickMicSetting(kind, value) {
+    const input = document.getElementById(kind === 'threshold' ? 'vad-slider-input' : 'vad-boost-input');
+    if (!input) return;
+    input.value = String(value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+const diagnosticsFeature = createDiagnosticsFeature({ store: diagnosticsStore, events: LivekitClient.RoomEvent });
+const shareSubscriptions = createShareSubscriptions({ store: sharingStore, onError: error => logError('shareSubscriptions', error),
+    onWanted: (sid, wanted) => remoteAudioFeature.setTrackEnabled(sid, wanted),
+});
+export const watchSharedScreen = id => shareSubscriptions.watchScreen(id);
+export const stopWatchingScreen = () => shareSubscriptions.stopWatching();
+export const returnToRoomChat = () => shareSubscriptions.backToChat();
+export const toggleSharedAudio = id => { ensureAudioContext(); shareSubscriptions.toggleListening(id); };
+export const dismissShareNotice = id => shareSubscriptions.dismiss(id);
+export const markDiagnosticMoment = () => diagnosticsFeature.markMoment();
+const overlayClient = createOverlayClient({ store: overlayStore, invoke, listen, available: isTauriClient });
+let overlayRoom, overlaySession = 0, stopOverlayWatch;
+const overlayOwnerId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+function getOverlaySnapshot() {
+    if (room !== overlayRoom) { overlayRoom = room; overlaySession++; }
+    return buildOverlaySnapshot({
+        app: { ...appStore, media: { ...appStore.media, micOn: rustMicFeature.getIsMicOn(), screenOn: isScreenOn, appAudioSharing: isAppAudioSharing } },
+        presence: presenceStore, diagnostics: diagnosticsStore, theme: themeStore.activeTheme,
+        session: `${overlayOwnerId}:${overlaySession}`, connectionState: room?.state || 'disconnected',
+    });
+}
+const overlayOwner = createOverlayOwner({ invoke, listen, getSnapshot: getOverlaySnapshot, toggleMic,
+    onError: error => { overlayStore.error = error; },
+});
+export const controlStatusOverlay = action => overlayClient.control(action);
+export const saveOverlayPreferences = preferences => overlayClient.preferences(preferences);
+if (import.meta.hot) import.meta.hot.dispose(() => { diagnosticsFeature.dispose(); overlayOwner.dispose(); overlayClient.dispose(); stopOverlayWatch?.(); });
 let roomConnectionFeature;
 const autoUpdateFeature = createAutoUpdateFeature({
     invoke,
@@ -114,7 +165,14 @@ function startAutoUpdateChecks() {
 const presenceClient = createPresenceClient({
     logError,
     onMessage: (message) => {
+        workspaceFeature.receive(message);
         roomConnectionFeature?.applyPresenceMessage?.(message);
+        if (message.type === 'presence_snapshot' && workspaceStore.viewChannel && !presenceStore.channels.some(c => c.id === workspaceStore.viewChannel)) {
+            const actual = roomConnectionFeature?.getCurrentChannel?.();
+            const fallback = presenceStore.channels.find(c => c.id === actual) || presenceStore.channels.find(c => c.isLobby) || presenceStore.channels[0];
+            if (fallback) browseChannel(fallback.id);
+            else { workspaceStore.viewChannel = ''; deactivateChatChannel(); }
+        }
 
         // Phase 3：Presence 不再处理聊天消息和 Reaction。
         // 聊天与 Reaction 的实时同步统一由 Chat WebSocket 处理。
@@ -141,9 +199,27 @@ const presenceClient = createPresenceClient({
     },
     onConnectionChange: (state = {}) => {
         // presenceClient 在 onopen 内原子地恢复当前频道并请求 snapshot；这里不重复发送 join。
+        if (!state.connected) workspaceFeature.disconnect();
         requestStoreSync();
     },
 });
+
+const workspaceFeature = createWorkspaceFeature({ store: workspaceStore, send: payload => presenceClient.sendWorkspaceCommand(payload) });
+export const workspaceAction = (action, values) => workspaceFeature.run(action, values);
+export function openChannelDialog(channel = null) { workspaceStore.error = ''; workspaceStore.channelDialog = channel ? { mode: 'delete', ...channel } : { mode: 'create' }; }
+export function openCardDialog(card = null) {
+    workspaceStore.error = '';
+    const channel = presenceStore.channels.find(c => c.id === workspaceStore.viewChannel);
+    workspaceStore.cardDialog = card ? { ...card } : { game: '', note: '', targetChannel: channel && !channel.isLobby ? channel.id : '' };
+}
+export function browseChannel(channelId) {
+    if (!presenceStore.connected || !presenceStore.channels.some(c => c.id === channelId)) return;
+    workspaceStore.viewChannel = channelId;
+    switchChatChannel(channelId);
+    chatClient.subscribeChannel(channelId);
+    scheduleChatHistoryRefresh(channelId, 'browse_channel', { force: true, delayMs: 0 });
+}
+if (import.meta.hot) import.meta.hot.dispose(() => workspaceFeature.disconnect());
 
 
 
@@ -190,7 +266,7 @@ const chatClient = createChatClient({
     },
     onConnectionChange: (state = {}) => {
         // Chat WS 重连成功后，chatClient 会自动恢复订阅；这里额外触发一次历史补偿。
-        const current = roomConnectionFeature?.getCurrentChannel?.() || chatStore.currentChannelId;
+        const current = workspaceStore.viewChannel || roomConnectionFeature?.getCurrentChannel?.() || chatStore.currentChannelId;
         if (state.connected && current) {
             scheduleChatHistoryRefresh(current, 'chat_reconnected', { force: true, delayMs: 300 });
         }
@@ -236,6 +312,7 @@ function scheduleChatHistoryRefresh(channelId, reason = 'unknown', options = {})
 function handleChatSubscribed(channelId) {
     const cleanId = String(channelId || '').trim();
     if (!cleanId) return;
+    if (workspaceStore.viewChannel && workspaceStore.viewChannel !== cleanId) return;
 
     // 如果自动进入频道时 chatStore 还没切到对应频道，这里补齐，避免“进频道看不到历史，切一下才显示”。
     if (chatStore.currentChannelId !== cleanId) {
@@ -248,7 +325,7 @@ function handleChatSubscribed(channelId) {
 // Phase 3：历史补偿。
 // 即使 Chat WebSocket 独立后，仍需要历史补偿：用于启动初次加载、重连漏消息、窗口休眠恢复等场景。
 function refreshCurrentChatHistory(reason = 'manual', options = {}) {
-    const current = roomConnectionFeature?.getCurrentChannel?.() || chatStore.currentChannelId;
+    const current = workspaceStore.viewChannel || roomConnectionFeature?.getCurrentChannel?.() || chatStore.currentChannelId;
     if (!current) return;
     scheduleChatHistoryRefresh(current, reason, options);
 }
@@ -261,7 +338,7 @@ let presenceSyncTimer = null;
 let presenceSnapshotTimer = null;
 
 function getCurrentPresenceChannel() {
-    return roomConnectionFeature?.getCurrentChannel?.() || chatStore.currentChannelId || presenceClient.getCurrentChannel?.() || '';
+    return roomConnectionFeature?.getCurrentChannel?.() || presenceClient.getCurrentChannel?.() || '';
 }
 
 function schedulePresenceSnapshot(reason = 'unknown', delayMs = 250) {
@@ -554,6 +631,7 @@ const screenShareFeature = createScreenShareFeature({
     getRoom: () => room,
     getIsScreenOn: () => isScreenOn,
     setIsScreenOn: (value) => { isScreenOn = value; requestStoreSync(); },
+    onTargetChanged: target => diagnosticsFeature.setTarget(target),
 });
 
 const chatFeature = createChatFeature({
@@ -582,11 +660,13 @@ const participantsFeature = createParticipantsFeature({
 
 const livekitEventsFeature = createLivekitEventsFeature({
     LivekitClient,
+    shares: shareSubscriptions,
     getRoom: () => room,
     getSelectedAudioOutputId: () => selectedAudioOutputId,
     ensureParticipantVolumeState,
     addRemoteGainNode: (...args) => remoteAudioFeature.addRemoteGainNode(...args),
     removeRemoteAudioRouteByTrackSid: (...args) => remoteAudioFeature.removeRemoteAudioRouteByTrackSid(...args),
+    clearRemoteAudio: () => remoteAudioFeature.clearRemoteGainNodes(),
     updateParticipantList: (...args) => updateParticipantList(...args),
     updateActiveSpeakerUI: (...args) => updateActiveSpeakerUI(...args),
     markParticipantAsActiveSpeaker: (...args) => participantsFeature.markParticipantAsActiveSpeaker(...args),
@@ -608,6 +688,7 @@ const livekitEventsFeature = createLivekitEventsFeature({
     activeSpeakerLevelThreshold: ACTIVE_SPEAKER_LEVEL_THRESHOLD,
     showLocalScreenPreview: (...args) => screenShareFeature.showLocalScreenPreview(...args),
     hideLocalScreenPreview: (...args) => screenShareFeature.hideLocalScreenPreview(...args),
+    onLocalScreenStopped: () => screenShareFeature.syncStopped(),
     renderChatMessage: (...args) => chatFeature.renderChatMessage(...args),
     onLivekitConnectionStable: ({ reason } = {}) => {
         schedulePresenceChannelSync(`livekit_${reason || 'stable'}`, { delayMs: 120, snapshotDelayMs: 350 });
@@ -649,7 +730,7 @@ roomConnectionFeature = createRoomConnectionFeature({
     autoJoinFirstChannelAfterLobby: AUTO_JOIN_FIRST_CHANNEL_AFTER_LOBBY,
     sanitizeText,
     getRoom: () => room,
-    setRoom: (value) => { room = value; if (!value) { clearVoiceMemberAudioStates(); clearCurrentVoiceMembers(); } else syncVoiceMemberAudioStatesFromRoom('set_room'); requestStoreSync(); },
+    setRoom: (value) => { room = value; diagnosticsFeature.attachRoom(value); if (!value) { clearVoiceMemberAudioStates(); clearCurrentVoiceMembers(); } else { workspaceStore.viewChannel = roomConnectionFeature.getCurrentChannel(); syncVoiceMemberAudioStatesFromRoom('set_room'); } requestStoreSync(); },
     ensureAudioContext,
     audioPipelines: audioPipelinesFeature,
     rustMic: rustMicFeature,
@@ -783,7 +864,7 @@ async function sendChatMessage(text, retryMessageId = null) {
     const cleanText = String(retryMessage?.content || text || '').trim();
     if (!cleanText) return false;
 
-    const currentChannel = roomConnectionFeature?.getCurrentChannel?.();
+    const currentChannel = workspaceStore.viewChannel || roomConnectionFeature?.getCurrentChannel?.();
     if (!currentChannel) {
         logError('runtime/sendChatMessage 当前未加入频道，无法发送聊天消息', null, 'warn');
         return false;
@@ -814,7 +895,7 @@ async function sendChatMessage(text, retryMessageId = null) {
 
     // Phase 2.1：发送前确保 Chat WebSocket 处于 OPEN，并补订阅当前频道。
     await ensureChatSocketConnected(3000);
-    if (roomConnectionFeature?.getCurrentChannel?.() !== currentChannel) {
+    if ((workspaceStore.viewChannel || roomConnectionFeature?.getCurrentChannel?.()) !== currentChannel) {
         markMessageFailed(clientMessageId);
         requestStoreSync();
         return false;
@@ -834,7 +915,7 @@ async function sendChatMessage(text, retryMessageId = null) {
     // 临界状态兜底：如果第一次发送失败，等待/重连后再重试一次。
     if (!sent) {
         await ensureChatSocketConnected(2000);
-        if (roomConnectionFeature?.getCurrentChannel?.() !== currentChannel) {
+        if ((workspaceStore.viewChannel || roomConnectionFeature?.getCurrentChannel?.()) !== currentChannel) {
             markMessageFailed(clientMessageId);
             requestStoreSync();
             return false;
@@ -914,7 +995,7 @@ function toggleLocalScreenSubscription(identity) { return livekitEventsFeature.t
 
 function getMicCaptureOptions() { return rustMicFeature.getMicCaptureOptions(); }
 function updateMicSourceButton() { return rustMicFeature.updateMicSourceButton(); }
-function switchMicSource(source) { return rustMicFeature.switchMicSource(source); }
+function switchMicSource(source) { return afterAction(rustMicFeature.switchMicSource(source)); }
 function startRustMicShare() { return afterAction(rustMicFeature.startRustMicShare()); }
 function stopRustMicShare() { return afterAction(rustMicFeature.stopRustMicShare()); }
 function toggleRustMicShare() { return afterAction(rustMicFeature.toggleRustMicShare()); }
@@ -925,7 +1006,7 @@ function renderChannelList() { return roomConnectionFeature.renderChannelList();
 function refreshRoomsFromServer() { return roomConnectionFeature.refreshRoomsFromServer(); }
 function startRoomPolling() { return roomConnectionFeature.startRoomPolling(); }
 function stopRoomPolling() { return roomConnectionFeature.stopRoomPolling(); }
-function createChannel() { return roomConnectionFeature.createChannel(); }
+function createChannel() { return openChannelDialog(); }
 function resetRoomUIAfterDisconnect() { return roomConnectionFeature.resetRoomUIAfterDisconnect(); }
 
 function getCurrentApiBase() {
@@ -971,7 +1052,7 @@ async function ensureChatSocketConnected(timeoutMs = 3000) {
     }
 
     const connected = chatClient.isConnected?.() || false;
-    const current = roomConnectionFeature?.getCurrentChannel?.();
+    const current = workspaceStore.viewChannel || roomConnectionFeature?.getCurrentChannel?.();
     if (connected && current) chatClient.subscribeChannel(current);
     return connected;
 }
@@ -993,6 +1074,7 @@ function joinRoom(options) {
     );
 }
 function switchChannel(roomName) {
+    workspaceStore.viewChannel = roomName || '';
     // 切换频道时先切换本地频道记录；历史加载交给 chat_subscribed 后的稳定时机触发。
     if (roomName) {
         switchChatChannel(roomName);
@@ -1009,6 +1091,7 @@ function switchChannel(roomName) {
     );
 }
 function connectToChannel(targetRoomName, options) {
+    workspaceStore.viewChannel = targetRoomName || '';
     if (targetRoomName) {
         switchChatChannel(targetRoomName);
         scheduleChatHistoryRefresh(targetRoomName, 'connect_to_channel', { force: true, delayMs: 350 });
@@ -1026,7 +1109,14 @@ function connectToChannel(targetRoomName, options) {
 function leaveRoom() {
     return afterAction(
         Promise.resolve(roomConnectionFeature.leaveRoom()).finally(() => {
+            workspaceStore.viewChannel = '';
+            workspaceStore.channelDialog = null;
+            workspaceStore.cardDialog = null;
+            workspaceStore.error = '';
             chatClient.disconnect();
+            for (const pending of chatHistoryTimers.values()) clearTimeout(pending.timer);
+            chatHistoryTimers.clear();
+            deactivateChatChannel();
         })
     );
 }
@@ -1035,10 +1125,11 @@ function leaveRoom() {
 /** 返回当前 LiveKit Room 对象，仅供 UI 统计面板读取本地 WebRTC stats。 */
 function getLiveKitRoom() { return room; }
 
-/** 刷新麦克风下拉框；Tauri 模式走 Rust 设备枚举，浏览器模式走 LiveKit 设备枚举。 */
+/** 刷新麦克风下拉框；按当前处理模式选择 WASAPI 或 LiveKit 设备枚举。 */
 async function updateMicList() {
     return updateMicListFromModule({
         isTauriClient,
+        useRustMic: isTauriClient && rustMicFeature.getCurrentMicSource() === 'rust',
         invoke,
         LivekitClient,
     });
@@ -1046,8 +1137,11 @@ async function updateMicList() {
 
 /** 切换麦克风设备；如果当前 Rust 麦克风已开启，会重启 9002 管线并重新 publish。 */
 async function switchMic(deviceId) {
+    const select = document.getElementById('mic-select');
+    if (select) select.value = deviceId;
     const result = await switchMicFromModule(deviceId, {
         isTauriClient,
+        useRustMic: isTauriClient && rustMicFeature.getCurrentMicSource() === 'rust',
         invoke,
         LivekitClient,
         getRoom: () => room,
@@ -1081,6 +1175,8 @@ async function switchAudioOutput(deviceId) {
         getRemoteAudioContext: () => remoteAudioContext,
         getLocalRustMicAudioContext: () => audioPipelinesFeature.getLocalRustMicAudioContext(),
     });
+    const select = document.getElementById('audio-output-select');
+    if (select) select.value = selectedAudioOutputId;
     syncAppStore();
 }
 
@@ -1126,6 +1222,7 @@ function initLegacyDomBlock2() {
 
     function applyVadThreshold(value, { persist = true } = {}) {
         const val = clampNumber(value, 0, 100, 20);
+        appStore.media.micThreshold = val;
         if (slider) slider.value = String(val);
         if (marker) marker.style.left = val + '%';
         if (text) text.innerText = val + '%';
@@ -1138,6 +1235,7 @@ function initLegacyDomBlock2() {
 
     function applyMicBoost(value, { persist = true } = {}) {
         const val = clampNumber(value, 1, 20, 5);
+        appStore.media.micBoost = val;
         const sliderValue = Math.round(val * 10);
         if (boostSlider) boostSlider.value = String(sliderValue);
         if (boostText) boostText.innerText = val.toFixed(1) + 'x';
@@ -1169,6 +1267,7 @@ function initLegacyDomBlock2() {
 
     listen('mic_volume', (event) => {
         const volumePercent = Number(event.payload) || 0;
+        appStore.media.micLevel = Math.max(0, Math.min(100, volumePercent));
 
         // 设置中心改成标签页后，VAD 相关 DOM 可能在初始化后被 Vue 重新挂载。
         // 这里每次事件都重新查询一次元素，避免闭包里保存的是旧节点或空节点，
@@ -1200,6 +1299,11 @@ export function initLegacyDom() {
     initLegacyDomBlock2();
     markAppBooted();
     syncAppStore();
+    if (isTauriClient) {
+        void overlayClient.start();
+        void overlayOwner.start().catch(error => { overlayStore.error = String(error); });
+        stopOverlayWatch = watch(() => JSON.stringify(getOverlaySnapshot()), () => overlayOwner.changed());
+    }
 }
 
 Object.assign(window, {
@@ -1249,6 +1353,7 @@ export {
     startRoomPolling,
     stopRoomPolling,
     switchMic,
+    switchMicSource,
     switchAudioOutput,
     setParticipantVolume,
     getParticipantVolumePercent,

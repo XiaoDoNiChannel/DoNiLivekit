@@ -1,5 +1,9 @@
 <script setup>
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
+import { Volume2, Monitor, Mic, Music2, MicOff, ChevronDown, Trash2 } from 'lucide-vue-next';
+import { workspaceStore } from '../../stores/workspaceStore.js';
+import { sharingStore } from '../../stores/sharingStore.js';
+import { toggleSharedAudio, watchSharedScreen } from '../../app/runtime.js';
 import BaseAvatar from '../common/BaseAvatar.vue';
 import { appStore } from '../../stores/appStore.js';
 import {
@@ -10,6 +14,10 @@ import {
 import { chatStore, getChannelNotification, markChannelRead } from '../../stores/chatStore.js';
 
 const DEFAULT_CHANNELS = ['day0', 'day1', 'day2'];
+const emit = defineEmits(['switch-channel', 'delete-channel']);
+const expandedMembers = ref({});
+function memberShares(member) { return sharingStore.shares.filter(s => [member.identity, member.userId, volumeIdentity(member)].includes(s.identity)); }
+function toggleMember(member) { const id = memberKey(member); expandedMembers.value[id] = !expandedMembers.value[id]; }
 
 function cleanText(value) {
   return String(value || '').trim();
@@ -61,11 +69,13 @@ function normalizeChannel(channel) {
   return {
     id: id || name,
     name: name || id,
+    isLobby: !!channel.isLobby,
+    displayName: channel.displayName || name || id,
     members,
   };
 }
 
-const currentChannelId = computed(() => cleanText(appStore.connection.currentChannel || chatStore.currentChannelId));
+const currentChannelId = computed(() => cleanText(workspaceStore.viewChannel || appStore.connection.currentChannel || chatStore.currentChannelId));
 
 const channelRows = computed(() => {
   // 显式依赖这些时间戳，保证 badge / 语音状态变化时重新计算。
@@ -91,9 +101,8 @@ const channelRows = computed(() => {
     });
   };
 
-  (presenceStore.channels || []).forEach(addChannel);
-  (appStore.connection.channels || []).forEach(addChannel);
-  DEFAULT_CHANNELS.forEach(addChannel);
+  if (presenceStore.channels.length) presenceStore.channels.forEach(addChannel);
+  else if (!presenceStore.connected) (appStore.connection.channels?.length ? appStore.connection.channels : DEFAULT_CHANNELS).forEach(addChannel);
 
   return rows;
 });
@@ -142,9 +151,7 @@ function getVolumePercent(member, source) {
 function switchToChannel(channelId) {
   const cleanId = cleanText(channelId);
   if (!cleanId) return;
-  if (typeof window !== 'undefined' && typeof window.switchChannel === 'function') {
-    window.switchChannel(cleanId);
-  }
+  emit('switch-channel', cleanId);
   markChannelRead(cleanId);
 }
 
@@ -177,25 +184,29 @@ function setMemberVolume(member, source, event) {
 <template>
   <div id="channel-list" class="discord-channel-list stage23-voice-list">
     <div
-      v-for="channel in channelRows"
+      v-for="(channel, index) in channelRows"
       :key="channel.id"
       class="channel-row voice-channel-card"
       :class="{ active: channel.id === currentChannelId }"
     >
+      <div v-if="index === 0 || channel.isLobby !== channelRows[index - 1].isLobby" class="channel-category-label">{{ channel.isLobby ? '主大厅' : '游戏语音' }}</div>
+      <div class="channel-select-row">
       <button
         type="button"
         class="channel-item voice-channel-button"
         :class="{ active: channel.id === currentChannelId }"
         @click="switchToChannel(channel.id)"
       >
-        <span class="channel-icon">🔊</span>
-        <span class="channel-name">{{ channel.name }}</span>
+        <Volume2 class="channel-icon" :size="16" />
+        <span class="channel-name">{{ channel.displayName || channel.name }}</span>
         <span class="channel-right-area">
           <span v-if="channel.mentions > 0" class="channel-mention-badge">@{{ channel.mentions > 99 ? '99+' : channel.mentions }}</span>
           <span v-else-if="channel.unread > 0" class="channel-unread-dot" :title="`${channel.unread} 条未读`"></span>
           <span class="channel-member-count channel-count">{{ channel.members.length }}</span>
         </span>
       </button>
+      <button v-if="!channel.isLobby && workspaceStore.supported" class="channel-delete-button" :disabled="workspaceStore.busy" :aria-label="`删除频道 ${channel.displayName || channel.name}`" @click="emit('delete-channel', channel)"><Trash2 :size="13" /></button>
+      </div>
 
       <div
         v-if="channel.members.length > 0"
@@ -214,7 +225,7 @@ function setMemberVolume(member, source, event) {
           title="右键 @ 这个成员"
           @contextmenu.prevent.stop="mentionMember(member)"
         >
-          <div class="voice-member-mainline">
+          <button type="button" class="voice-member-mainline" :aria-expanded="!!expandedMembers[memberKey(member)]" :aria-label="`${member.displayName} 的声音控制`" @click="toggleMember(member)">
             <span
               class="voice-member-avatar-shell"
               :class="{ 'mic-open': voiceState(member).micOpen, 'mic-closed': !voiceState(member).micOpen }"
@@ -248,15 +259,16 @@ function setMemberVolume(member, source, event) {
               class="voice-member-mic"
               :class="{ 'mic-open': voiceState(member).micOpen, 'mic-closed': !voiceState(member).micOpen }"
               :title="voiceState(member).micTitle"
-            >{{ voiceState(member).micIcon }}</span>
-          </div>
+            ><component :is="voiceState(member).micOpen ? Mic : MicOff" :size="13" /></span>
+            <ChevronDown v-if="!isSelfMember(member)" :size="12" />
+          </button>
 
           <div
-            v-if="!isSelfMember(member)"
+            v-if="!isSelfMember(member) && expandedMembers[memberKey(member)]"
             class="voice-member-volume-row source-mic"
             title="语音/麦克风音量"
           >
-            <span class="voice-member-volume-icon">🎤</span>
+            <Mic class="voice-member-volume-icon" :size="13" />
             <input
               type="range"
               class="volume-slider voice-member-volume-slider"
@@ -282,11 +294,11 @@ function setMemberVolume(member, source, event) {
           </div>
 
           <div
-            v-if="voiceState(member).hasAppAudio && !isSelfMember(member)"
+            v-if="memberShares(member).some(s => s.kind === 'appaudio') && !isSelfMember(member) && expandedMembers[memberKey(member)]"
             class="voice-member-volume-row source-appaudio"
             title="应用/进程共享音频音量"
           >
-            <span class="voice-member-volume-icon">🖥️</span>
+            <Music2 class="voice-member-volume-icon" :size="13" />
             <input
               type="range"
               class="volume-slider voice-member-volume-slider"
@@ -310,10 +322,9 @@ function setMemberVolume(member, source, event) {
               <span class="voice-member-volume-unit">%</span>
             </span>
           </div>
+          <div v-if="!isSelfMember(member)" class="member-share-actions"><button v-for="share in memberShares(member)" :key="share.id" :title="share.title" :aria-pressed="share.wanted" @click="share.kind === 'screen' ? watchSharedScreen(share.id) : toggleSharedAudio(share.id)"><component :is="share.kind === 'screen' ? Monitor : Music2" :size="12" />{{ share.kind === 'screen' ? '观看' : share.wanted ? '停止收听' : '收听程序' }}</button></div>
         </div>
       </div>
-
-      <div v-else class="voice-channel-empty">暂无成员</div>
     </div>
   </div>
 </template>
