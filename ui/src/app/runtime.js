@@ -128,15 +128,8 @@ const LEGACY_DEFAULT_SERVER_IP = '10.126.126.10:5000';
 let autoUpdateTimer = null;
 let updateProgressListenerAttached = false;
 
-function getConfiguredUpdateServerAddress() {
-    const saved = String(localStorage.getItem('lk_server_ip') || '').trim();
-    if (!saved || saved === LEGACY_DEFAULT_SERVER_IP) return DEFAULT_SERVER_IP;
-    return saved;
-}
-
-async function checkForUpdates(serverAddress = '') {
-    const address = serverAddress || getConfiguredUpdateServerAddress();
-    return autoUpdateFeature.checkSilently(address);
+async function checkForUpdates() {
+    return autoUpdateFeature.checkSilently();
 }
 
 async function installAvailableUpdate() {
@@ -1063,9 +1056,8 @@ function joinRoom(options) {
     syncProfileToServer({ silent: true });
     return afterAction(
         Promise.resolve(roomConnectionFeature.joinRoom(options)).then(async (result) => {
-            // The first successful connection also establishes a valid runtime update source.
-            // Detached by design: update availability must never delay lobby entry.
-            void checkForUpdates(getCurrentApiBase());
+            // Detached by design: GitHub update availability must never delay lobby entry.
+            void checkForUpdates();
             await ensureChatSocketConnected().catch((error) => {
                 logError('runtime/joinRoom 连接 Chat WebSocket 失败', error, 'warn');
             });

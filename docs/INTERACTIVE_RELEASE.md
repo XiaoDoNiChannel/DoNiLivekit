@@ -24,6 +24,8 @@
 
 GitHub 模式会在最后列出待提交文件。只有准确输入 `RELEASE` 才会执行 `git add -A`、提交、推送当前分支、创建并推送版本标签。标签会触发 `.github/workflows/release.yml`。
 
+工作流完成后会先创建 Draft Release。检查 `latest.json`、安装包与 `.sig` 后必须点击 `Publish release`，GitHub 自动更新才会对客户端生效。可另行把安装包上传到群文件，作为 GitHub 超时的手动下载备份。
+
 本地模式会询问 updater 私钥路径和密码，调用 `Build-LanRelease.ps1`，生成：
 
 ```text
@@ -55,7 +57,7 @@ server-release/DoNiChannel-Server-v版本.zip
 1. 首次运行 `OPEN_FIREWALL.cmd`。
 2. 运行 `START_SERVER.cmd`。
 3. 停止时运行 `STOP_SERVER.cmd`。
-4. 发布客户端更新时运行 `PUBLISH_CLIENT_UPDATE.cmd`。
+4. `PUBLISH_CLIENT_UPDATE.cmd` 只用于把首个 GitHub 更新源过渡版本提供给仍在使用旧局域网更新源的客户端；完成迁移后不再用于日常客户端发布。
 
 `START_SERVER.cmd` 会分别打开 LiveKit 和 Python 后端的可见控制台。控制台输出同时写入
 `logs/livekit.log` 和 `logs/backend.log`。默认单个日志最大 10 MB，每个服务最多保留 5 份。

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "小豆泥电竞",
-  "version": "0.1.3",
+  "version": "0.1.4",
 "identifier": "com.r.donichannel",
   "build": {
     "beforeDevCommand": "npm run frontend:dev",
@@ -38,8 +38,10 @@
   },
   "plugins": {
     "updater": {
-      "dangerousInsecureTransportProtocol": true,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ3Q0Q1Njc5NkRGNzcyRDQKUldUVWN2ZHRlVmJOMXpPWHhsaWl4cWRkNTBKTk4vMFhHaHRNMG1vMXo3M0JmbkU0dmF1Uy9nTHMK"
+      "endpoints": [
+        "https://github.com/XiaoDoNiChannel/DoNiLivekit/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc2OEZFRUFGNjgxMTI2OUMKUldTY0poRm9yKzZQZHNvVXc2NFhlN0pkMmdlQisyY284ZWkyaVB1UkR5MzJpbURYUEZxa2ZLcEMK"
     }
   }
 }

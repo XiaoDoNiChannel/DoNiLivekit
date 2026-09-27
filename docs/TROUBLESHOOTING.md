@@ -174,18 +174,21 @@ AudioContext.setSinkId 切换失败
 
 ## 自动更新始终显示 unavailable
 
-静默更新只有在以下条件同时满足时才执行：运行于 Tauri、已经保存服务器地址、FastAPI 可访问。依次检查：
+静默更新只有在 Tauri 客户端能够访问 GitHub Releases 时才执行。依次检查：
 
 ```text
-GET http://服务器:5000/api/update/windows/x86_64/当前版本
-服务端 downloads/latest.json 是否存在
-latest.json 引用的 NSIS updater bundle 是否也位于 downloads/
+https://github.com/XiaoDoNiChannel/DoNiLivekit/releases/latest/download/latest.json
+目标 Release 是否已经 Publish（Draft 不可用）
+latest.json 是否包含 windows-x86_64 / windows-x86_64-nsis
+latest.json 引用的 GitHub Release asset 是否可下载
 signature 是否由与 tauri.conf.json 公钥匹配的私钥生成
 ```
 
-没有更新应返回 204，这是正常行为。网络不可达或旧服务器没有接口时，客户端记录 `autoUpdate/check` 调试日志并继续进入主界面。
+当前版本已经等于 GitHub 最新版本时不会弹窗，这是正常行为。GitHub 网络不可达或超时时，客户端记录 `autoUpdate/check` 调试日志并继续进入主界面，用户可从群文件手动下载安装包。
 
-局域网 HTTP 仅通过 updater 的 `dangerousInsecureTransportProtocol` 支持；签名校验仍然强制启用。不要通过删除公钥或自行 fetch/执行安装包来“修复”更新。
+签名校验始终强制启用。不要通过删除公钥或关闭验证来“修复”更新。
+
+出现 `The signature was created with a different key than the one provided` 时，说明安装包的签名私钥和当前客户端内置公钥不是一对，与文件托管在 GitHub 还是中心服务器无关。若原私钥已经丢失，旧客户端无法自动跨越这次密钥轮换，只能从群文件手动安装一次包含新公钥的版本。
 
 ## 数据库迁移或启动失败
 

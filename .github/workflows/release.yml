@@ -27,6 +27,13 @@ jobs:
       - name: Install root Tauri CLI dependencies
         run: npm ci
 
+      - name: Verify updater signing key matches client public key
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: .\scripts\Test-UpdaterSigningKey.ps1
+
       - name: Install frontend dependencies
         working-directory: ui
         run: npm ci

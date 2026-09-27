@@ -77,11 +77,15 @@ async function retryCheck() {
       </header>
 
       <p class="update-notice-version">
-        当前版本 {{ updateStore.currentVersion || '未知' }} · 更新来自中心服务器
+        当前版本 {{ updateStore.currentVersion || '未知' }} · 更新来自 GitHub Releases
       </p>
 
       <pre v-if="updateStore.notes" class="update-notice-notes">{{ updateStore.notes }}</pre>
       <p v-else class="update-notice-notes empty">此版本未提供更新说明。</p>
+
+      <p class="update-notice-fallback">
+        如果 GitHub 下载超时，可在群文件内下载对应版本安装包。
+      </p>
 
       <div v-if="busy" class="update-progress-wrap">
         <div class="update-progress-track">
@@ -190,6 +194,16 @@ async function retryCheck() {
 
 .update-notice-notes.empty {
   color: var(--dc-text-muted, #b5bac1);
+}
+
+.update-notice-fallback {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--dc-accent, #5865f2) 13%, transparent);
+  color: var(--dc-text-muted, #b5bac1);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .update-progress-wrap {

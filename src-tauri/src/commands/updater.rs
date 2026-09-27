@@ -15,7 +15,6 @@ pub(crate) struct UpdateCheckResult {
     notes: Option<String>,
     pub_date: Option<String>,
 }
-
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateDownloadProgress {
@@ -25,34 +24,16 @@ struct UpdateDownloadProgress {
     progress_percent: Option<f64>,
 }
 
-fn endpoint(server_base_url: &str) -> Result<tauri::Url, String> {
-    let base = server_base_url.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return Err("更新服务器地址为空".to_string());
-    }
-    let url = format!("{base}/api/update/{{{{target}}}}/{{{{arch}}}}/{{{{current_version}}}}");
-    url.parse::<tauri::Url>()
-        .map_err(|error| format!("更新服务器地址无效: {error}"))
-}
-
-fn updater(
-    app: &AppHandle,
-    server_base_url: &str,
-) -> Result<tauri_plugin_updater::Updater, String> {
+fn updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     app.updater_builder()
-        .endpoints(vec![endpoint(server_base_url)?])
-        .map_err(|error| format!("配置动态更新地址失败: {error}"))?
         .build()
-        .map_err(|error| format!("初始化更新器失败: {error}"))
+        .map_err(|error| format!("初始化 GitHub 更新器失败: {error}"))
 }
 
 #[tauri::command]
-pub(crate) async fn check_for_update(
-    app: AppHandle,
-    server_base_url: String,
-) -> Result<UpdateCheckResult, String> {
+pub(crate) async fn check_for_update(app: AppHandle) -> Result<UpdateCheckResult, String> {
     let current_version = app.package_info().version.to_string();
-    let update = updater(&app, &server_base_url)?
+    let update = updater(&app)?
         .check()
         .await
         .map_err(|error| format!("检查更新失败: {error}"))?;
@@ -76,11 +57,8 @@ pub(crate) async fn check_for_update(
 }
 
 #[tauri::command]
-pub(crate) async fn install_update(
-    app: AppHandle,
-    server_base_url: String,
-) -> Result<bool, String> {
-    let Some(update) = updater(&app, &server_base_url)?
+pub(crate) async fn install_update(app: AppHandle) -> Result<bool, String> {
+    let Some(update) = updater(&app)?
         .check()
         .await
         .map_err(|error| format!("检查更新失败: {error}"))?
@@ -136,18 +114,4 @@ pub(crate) async fn install_update(
         .await
         .map_err(|error| format!("下载或安装更新失败: {error}"))?;
     Ok(true)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn endpoint_keeps_runtime_server_and_tauri_placeholders() {
-        let url = endpoint("http://192.168.1.20:5000/").expect("valid endpoint");
-        assert_eq!(
-            url.as_str(),
-            "http://192.168.1.20:5000/api/update/%7B%7Btarget%7D%7D/%7B%7Barch%7D%7D/%7B%7Bcurrent_version%7D%7D"
-        );
-    }
 }

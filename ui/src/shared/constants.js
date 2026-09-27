@@ -4,7 +4,7 @@
 // 默认后端地址：token/API 服务端口。LiveKit WebSocket 端口在 roomConnection.js 中拼接为 7880。
 export const DEFAULT_SERVER_IP = '10.126.126.67:5000';
 
-// 已启动客户端定期向中心服务器检查更新；检查失败不会影响语音功能。
+// 已启动客户端定期向 GitHub Releases 检查更新；检查失败不会影响语音功能。
 export const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
 // 进入大厅后是否自动加入第一个语音频道。
