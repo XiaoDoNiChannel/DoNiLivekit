@@ -111,7 +111,7 @@ LiveKit：  ws://10.126.126.67:7880
 
 停止服务：双击 STOP_SERVER.cmd。
 
-发布客户端更新：双击 PUBLISH_CLIENT_UPDATE.cmd，然后输入包含 latest.json、更新安装包和对应 .sig 的目录。
+旧安装包渠道：PUBLISH_CLIENT_UPDATE.cmd 仅处理旧版安装包；新版免安装 EXE 通过 GitHub 发布，不能交给此脚本。
 
 升级：
 1. 先运行旧目录中的 STOP_SERVER.cmd。

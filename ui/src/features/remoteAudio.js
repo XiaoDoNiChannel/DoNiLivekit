@@ -7,7 +7,7 @@ export function createRemoteAudioFeature(context) {
     /** 为远端 track 建立 GainNode 路由，并套用该成员已保存的音量。 */
     function addRemoteGainNode(identity, source, track, audioEl) {
         const volumes = context.ensureParticipantVolumeState(identity);
-        const gain = volumes[source] !== undefined ? volumes[source] : 1;
+        const gain = source === 'soundboard' ? (context.getSoundboardGain?.(identity) ?? 1) : (volumes[source] !== undefined ? volumes[source] : 1);
         context.ensureAudioContext();
 
         const remoteAudioContext = context.getRemoteAudioContext();
@@ -94,12 +94,19 @@ export function createRemoteAudioFeature(context) {
     }
 
     return {
+        refreshSoundboardGain() {
+            document.querySelectorAll('[data-audio-source="soundboard"]').forEach(el => {
+                const gain = el.__playbackEnabled === false ? 0 : (context.getSoundboardGain?.(el.dataset.audioIdentity) ?? 1);
+                if (el.__gainNode) el.__gainNode.gain.value = gain;
+                else { el.volume = Math.min(1, gain); el.muted = gain === 0; }
+            });
+        },
         setTrackEnabled(trackSid, enabled) {
             document.querySelectorAll('[data-audio-track-sid]').forEach(el => {
                 if (el.dataset.audioTrackSid !== trackSid) return;
                 el.__playbackEnabled = enabled;
                 const volumes = context.ensureParticipantVolumeState(el.dataset.audioIdentity);
-                if (el.__gainNode) el.__gainNode.gain.value = enabled ? (volumes[el.dataset.audioSource] ?? 1) : 0;
+                if (el.__gainNode) el.__gainNode.gain.value = enabled ? (el.dataset.audioSource === 'soundboard' ? (context.getSoundboardGain?.(el.dataset.audioIdentity) ?? 1) : (volumes[el.dataset.audioSource] ?? 1)) : 0;
                 else el.muted = !enabled;
             });
         },

@@ -3,9 +3,17 @@ function Invoke-ReleaseGit {
     param([string[]]$Arguments)
     # Windows PowerShell 会把原生命令的 stderr 包装成 ErrorRecord。
     $ErrorActionPreference = 'Continue'
-    $output = @(& git @Arguments 2>&1 | ForEach-Object { "$_" })
-    $code = $LASTEXITCODE
-    return @{ ExitCode = $code; Lines = $output }
+    # git show 输出仓库中的 UTF-8 字节；Windows PowerShell 按控制台编码解码。
+    # CP936 会损坏中文，甚至吞掉 JSON 的结束引号。仅在 Git 调用期间使用 UTF-8。
+    $originalEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        $output = @(& git @Arguments 2>&1 | ForEach-Object { "$_" })
+        $code = $LASTEXITCODE
+        return @{ ExitCode = $code; Lines = $output }
+    } finally {
+        [Console]::OutputEncoding = $originalEncoding
+    }
 }
 
 function Invoke-VerifiedReleasePush {

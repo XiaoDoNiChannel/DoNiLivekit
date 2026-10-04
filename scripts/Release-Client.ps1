@@ -163,7 +163,7 @@ try {
                 }
             }
 
-            & (Join-Path $PSScriptRoot "Build-LanRelease.ps1")
+            & (Join-Path $PSScriptRoot "Build-PortableRelease.ps1")
             if ($LASTEXITCODE -ne 0) { throw "本地签名构建失败" }
         } finally {
             $env:TAURI_SIGNING_PRIVATE_KEY_PATH = $originalKeyPath
@@ -171,11 +171,7 @@ try {
             $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $originalPassword
         }
 
-        $publishNow = Read-Host "是否把更新产物发布到当前项目的 downloads？仅在本机就是中心服务器时输入 y"
-        if ($publishNow -match '^(y|yes)$') {
-            & (Join-Path $PSScriptRoot "Publish-LanUpdate.ps1") -SourceDirectory (Join-Path $projectRoot "release-assets\v$Version")
-            if ($LASTEXITCODE -ne 0) { throw "局域网更新发布失败" }
-        }
+        Write-Host "将 DoNiChannel.exe、DoNiChannel.exe.sig 和 latest-portable.json 上传到对应版本的 GitHub Release。群文件只需上传 EXE。"
         Write-Host "`n客户端本地发布准备完成。" -ForegroundColor Green
         exit 0
     }
@@ -204,7 +200,7 @@ try {
     }
 
     Write-Host "`n客户端 v$Version 已触发 GitHub Actions 构建。" -ForegroundColor Green
-    Write-Host "构建完成后下载 Draft Release 的 latest.json、更新安装包和对应 .sig，复制到中心服务器再运行 Publish-LanUpdate.ps1。"
+    Write-Host "构建完成后检查 Draft Release 的 latest-portable.json、DoNiChannel.exe 和对应 .sig；确认无误后必须点击 Publish release。旧安装版用户需先手动下载免安装 EXE 一次。"
 } finally {
     Pop-Location
 }

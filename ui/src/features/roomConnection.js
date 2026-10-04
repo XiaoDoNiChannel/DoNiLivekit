@@ -268,6 +268,7 @@ export function createRoomConnectionFeature(context) {
         shouldRestoreMicAfterChannelSwitch = shouldRestoreMic;
 
         try {
+            await context.soundboard?.reset();
             const currentRoom = context.getRoom();
             if (currentRoom) {
                 try {
@@ -444,6 +445,10 @@ export function createRoomConnectionFeature(context) {
             context.rustMic.updateMicSourceButton();
         });
 
+        await runNonCritical('准备一键喊话', async () => {
+            await context.soundboard?.prepare();
+        });
+
         await runNonCritical('刷新麦克风设备列表', async () => {
             await context.updateMicList();
         });
@@ -478,6 +483,7 @@ export function createRoomConnectionFeature(context) {
 
     /** 主动离开房间；释放麦克风、应用音频、屏幕共享和远端音频资源。 */
     async function leaveRoom() {
+        await context.soundboard?.reset();
         try {
             context.presence.leaveChannel?.();
             context.presence.disconnect?.();

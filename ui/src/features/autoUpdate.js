@@ -1,38 +1,25 @@
-export function normalizeServerBaseUrl(rawValue) {
-    const value = String(rawValue || '').trim().replace(/\/+$/, '');
-    if (!value) return null;
-    if (/^https?:\/\//i.test(value)) return value;
-    if (/^wss?:\/\//i.test(value)) {
-        return value.replace(/^ws/i, 'http');
-    }
-    return `http://${value}`;
-}
-
 export function createAutoUpdateFeature({
     invoke,
     isTauriClient,
     patchState,
     logger = console,
 }) {
-    let serverBaseUrl = null;
     let checkInFlight = null;
     let installInFlight = null;
 
-    async function checkSilently(rawServerAddress) {
-        serverBaseUrl = normalizeServerBaseUrl(rawServerAddress);
-        if (!isTauriClient || !serverBaseUrl) {
+    async function checkSilently() {
+        if (!isTauriClient) {
             patchState({ status: 'skipped', error: null });
             return { skipped: true };
         }
 
+        if (installInFlight) return { skipped: true };
         if (checkInFlight) return checkInFlight;
 
         checkInFlight = (async () => {
             patchState({ status: 'checking', error: null });
             try {
-                const result = await invoke('check_for_update', {
-                    serverBaseUrl,
-                });
+                const result = await invoke('check_for_update');
                 patchState({
                     status: result?.available ? 'available' : 'up-to-date',
                     available: !!result?.available,
@@ -66,10 +53,13 @@ export function createAutoUpdateFeature({
     }
 
     async function installAvailable() {
-        if (!isTauriClient || !serverBaseUrl) return false;
+        if (!isTauriClient) return false;
         if (installInFlight) return installInFlight;
 
         installInFlight = (async () => {
+            // Finish any silent check before entering the download state so it
+            // cannot overwrite progress while the replacement is prepared.
+            if (checkInFlight) await checkInFlight;
             patchState({
                 status: 'downloading',
                 error: null,
@@ -78,7 +68,7 @@ export function createAutoUpdateFeature({
                 progressPercent: 0,
             });
             try {
-                const installed = await invoke('install_update', { serverBaseUrl });
+                const installed = await invoke('install_update');
                 patchState({
                     status: installed ? 'installed' : 'up-to-date',
                     available: false,

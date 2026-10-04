@@ -28,6 +28,11 @@ pub(crate) struct Preferences {
     pub y: Option<i32>,
     pub width: f64,
     pub height: f64,
+    pub layout: String,
+    pub compact_width: f64,
+    pub compact_height: f64,
+    pub expanded_width: f64,
+    pub expanded_height: f64,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -37,16 +42,62 @@ impl Default for Preferences {
             edit_shortcut: "Ctrl+Alt+O".into(),
             x: None,
             y: None,
-            width: 320.0,
-            height: 164.0,
+            width: 360.0,
+            height: 184.0,
+            layout: "compact".into(),
+            compact_width: 360.0,
+            compact_height: 184.0,
+            expanded_width: 400.0,
+            expanded_height: 500.0,
         }
     }
 }
 impl Preferences {
     fn normalize(&mut self) {
         self.opacity = finite_clamp(self.opacity, 0.1, 1.0, 0.7);
-        self.width = finite_clamp(self.width, 260.0, 560.0, 320.0);
-        self.height = finite_clamp(self.height, 140.0, 300.0, 164.0);
+        if self.layout != "expanded" {
+            self.layout = "compact".into();
+        }
+        let expanded = self.layout == "expanded";
+        self.width = finite_clamp(
+            self.width,
+            if expanded { 340.0 } else { 260.0 },
+            if expanded { 640.0 } else { 560.0 },
+            360.0,
+        );
+        self.height = finite_clamp(
+            self.height,
+            if expanded { 360.0 } else { 140.0 },
+            if expanded { 720.0 } else { 300.0 },
+            if expanded { 500.0 } else { 184.0 },
+        );
+        self.compact_width = finite_clamp(self.compact_width, 260.0, 560.0, 360.0);
+        self.compact_height = finite_clamp(self.compact_height, 140.0, 300.0, 184.0);
+        self.expanded_width = finite_clamp(self.expanded_width, 340.0, 640.0, 400.0);
+        self.expanded_height = finite_clamp(self.expanded_height, 360.0, 720.0, 500.0);
+    }
+    fn change_layout(&mut self, layout: &str) -> Result<(), String> {
+        if !matches!(layout, "compact" | "expanded") {
+            return Err("未知浮窗布局".into());
+        }
+        if self.layout == layout {
+            return Ok(());
+        }
+        if self.layout == "expanded" {
+            self.expanded_width = self.width;
+            self.expanded_height = self.height;
+        } else {
+            self.compact_width = self.width;
+            self.compact_height = self.height;
+        }
+        self.layout = layout.into();
+        (self.width, self.height) = if layout == "expanded" {
+            (self.expanded_width, self.expanded_height)
+        } else {
+            (self.compact_width, self.compact_height)
+        };
+        self.normalize();
+        Ok(())
     }
 }
 fn finite_clamp(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
@@ -72,6 +123,8 @@ pub(crate) struct Snapshot {
     network_text: String,
     network_warning: bool,
     theme: String,
+    #[serde(default)]
+    panel: serde_json::Value,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,6 +166,26 @@ struct MicRequest {
     id: u64,
     session: String,
     enabled: bool,
+    deadline: u64,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ActionRequest {
+    #[serde(default)]
+    id: u64,
+    session: String,
+    kind: String,
+    #[serde(default)]
+    channel_id: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    identity: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    value: Option<f64>,
+    #[serde(default)]
     deadline: u64,
 }
 type PendingAction = Option<(u64, oneshot::Sender<Result<(), String>>)>;
@@ -226,6 +299,14 @@ fn fit_position(x: i32, y: i32, width: u32, height: u32, area: (i32, i32, u32, u
     (x.clamp(left, right), y.clamp(top, bottom))
 }
 fn place(window: &WebviewWindow, prefs: &Preferences, reset: bool) -> Result<(), String> {
+    let expanded = prefs.layout == "expanded";
+    // Clear the old limits before growing/shrinking across layouts.
+    window
+        .set_min_size(None::<tauri::LogicalSize<f64>>)
+        .map_err(err)?;
+    window
+        .set_max_size(None::<tauri::LogicalSize<f64>>)
+        .map_err(err)?;
     let monitors = window.available_monitors().map_err(err)?;
     let desired = if reset { None } else { prefs.x.zip(prefs.y) };
     let matched = desired.and_then(|(x, y)| {
@@ -250,6 +331,26 @@ fn place(window: &WebviewWindow, prefs: &Preferences, reset: bool) -> Result<(),
     let height = prefs.height.min(area.size.height as f64 / scale);
     window
         .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(err)?;
+    window
+        .set_min_size(Some(tauri::LogicalSize::new(
+            if expanded {
+                340.0_f64.min(width)
+            } else {
+                260.0_f64.min(width)
+            },
+            if expanded {
+                360.0_f64.min(height)
+            } else {
+                140.0_f64.min(height)
+            },
+        )))
+        .map_err(err)?;
+    window
+        .set_max_size(Some(tauri::LogicalSize::new(
+            if expanded { 640.0 } else { 560.0 },
+            if expanded { 720.0 } else { 300.0 },
+        )))
         .map_err(err)?;
     let (x, y) = desired.unwrap_or((area.position.x + 24, area.position.y + 24));
     let (x, y) = fit_position(
@@ -281,7 +382,7 @@ fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .preferences
         .clone();
     let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("overlay.html".into()))
-        .title("DoNiChannel 状态窗")
+        .title("DoNiChannel 队伍浮窗")
         .transparent(true)
         .decorations(false)
         .shadow(false)
@@ -292,7 +393,7 @@ fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .visible(false)
         .inner_size(prefs.width, prefs.height)
         .min_inner_size(260.0, 140.0)
-        .max_inner_size(560.0, 300.0)
+        .max_inner_size(640.0, 720.0)
         .build()
         .map_err(err)?;
     if let Err(error) = place(&window, &prefs, false) {
@@ -355,8 +456,16 @@ async fn control(app: &AppHandle, action: &str) -> Result<Status, String> {
         let window = ensure_window(app)?;
         if action == "reset" {
             let mut prefs = before.preferences.clone();
-            prefs.width = 320.0;
-            prefs.height = 164.0;
+            prefs.width = if prefs.layout == "expanded" {
+                400.0
+            } else {
+                360.0
+            };
+            prefs.height = if prefs.layout == "expanded" {
+                500.0
+            } else {
+                184.0
+            };
             place(&window, &prefs, true)?;
         } else if !before.visible {
             place(&window, &before.preferences, false)?;
@@ -466,12 +575,16 @@ pub(crate) async fn overlay_preferences(
     opacity: Option<f64>,
     toggle_shortcut: Option<String>,
     edit_shortcut: Option<String>,
+    layout: Option<String>,
 ) -> Result<Status, String> {
     caller(&window, false)?;
     let state = app.state::<OverlayState>();
     let _operation = state.operation.lock().await;
     let old = state.data.lock().unwrap().status.clone();
     let mut next = old.preferences.clone();
+    if let Some(ref layout) = layout {
+        next.change_layout(layout)?;
+    }
     if let Some(opacity) = opacity {
         next.opacity = finite_clamp(opacity, 0.1, 1.0, 0.7);
     }
@@ -507,6 +620,11 @@ pub(crate) async fn overlay_preferences(
             return Err(error);
         }
     }
+    if layout.is_some() {
+        if let Some(overlay) = app.get_webview_window(LABEL) {
+            place(&overlay, &next, false)?;
+        }
+    }
     {
         let mut data = state.data.lock().unwrap();
         data.status.preferences = next;
@@ -526,6 +644,9 @@ pub(crate) fn overlay_publish(
 ) -> Result<(), String> {
     caller(&window, true)?;
     snapshot.speakers.truncate(3);
+    if serde_json::to_vec(&snapshot.panel).map_err(err)?.len() > 512_000 {
+        return Err("浮窗消息数据过长".into());
+    }
     if snapshot.session.len() > 160
         || snapshot.channel.len() > 300
         || snapshot.speakers.iter().any(|s| s.len() > 300)
@@ -633,6 +754,106 @@ pub(crate) fn overlay_mic_result(
     Ok(())
 }
 #[tauri::command]
+pub(crate) async fn overlay_action(
+    app: AppHandle,
+    window: WebviewWindow,
+    mut request: ActionRequest,
+) -> Result<(), String> {
+    caller(&window, false)?;
+    let (tx, rx) = oneshot::channel();
+    {
+        let state = app.state::<OverlayState>();
+        let mut data = state.data.lock().unwrap();
+        if data.pending.is_some() {
+            return Err("浮窗操作尚未完成".into());
+        }
+        if window.label() == LABEL && (!data.status.visible || !data.status.interactive) {
+            return Err("请先进入浮窗调整模式".into());
+        }
+        let packet = data.packet.as_ref().ok_or("尚未收到浮窗状态")?;
+        if !data
+            .received
+            .is_some_and(|time| time.elapsed() <= STALE_AFTER)
+            || packet.snapshot.session != request.session
+        {
+            return Err("浮窗状态已变化，请等待更新".into());
+        }
+        validate_action(&packet.snapshot, &request)?;
+        data.request_seq += 1;
+        request.id = data.request_seq;
+        data.pending = Some((request.id, tx));
+    }
+    request.deadline = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+        + 8000;
+    let id = request.id;
+    let result = match app.emit_to("main", "overlay-action-request", request) {
+        Ok(()) => match tokio::time::timeout(Duration::from_secs(8), rx).await {
+            Ok(Ok(result)) => result,
+            _ => Err("操作确认超时，请先检查消息或语音状态，避免重复操作".into()),
+        },
+        Err(error) => Err(err(error)),
+    };
+    let state = app.state::<OverlayState>();
+    let mut data = state.data.lock().unwrap();
+    if data
+        .pending
+        .as_ref()
+        .is_some_and(|(pending, _)| *pending == id)
+    {
+        data.pending = None;
+    }
+    result
+}
+fn validate_action(snapshot: &Snapshot, request: &ActionRequest) -> Result<(), String> {
+    match request.kind.as_str() {
+        "chat" | "read" => {
+            if request.channel_id.is_empty()
+                || snapshot.panel["chatChannelId"].as_str() != Some(request.channel_id.as_str())
+            {
+                return Err("聊天频道已变化".into());
+            }
+            if request.kind == "chat"
+                && (request.content.trim().is_empty()
+                    || request.content.chars().count() > 2000
+                    || snapshot.panel["chatConnected"].as_bool() != Some(true))
+            {
+                return Err("消息为空、过长或聊天未连接".into());
+            }
+        }
+        "volume" => {
+            if !snapshot.connected
+                || snapshot.reconnecting
+                || !matches!(request.source.as_str(), "mic" | "appaudio")
+                || !request
+                    .value
+                    .is_some_and(|v| v.is_finite() && (0.0..=300.0).contains(&v))
+                || !snapshot.panel["members"].as_array().is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row["self"].as_bool() == Some(false)
+                            && row["volumeIdentity"].as_str() == Some(request.identity.as_str())
+                    })
+                })
+            {
+                return Err("成员或音量状态已变化".into());
+            }
+        }
+        _ => return Err("未知浮窗操作".into()),
+    }
+    Ok(())
+}
+#[tauri::command]
+pub(crate) fn overlay_action_result(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: u64,
+    error: Option<String>,
+) -> Result<(), String> {
+    overlay_mic_result(app, window, id, error)
+}
+#[tauri::command]
 pub(crate) fn overlay_drag(window: WebviewWindow) -> Result<(), String> {
     if window.label() != LABEL {
         return Err("只能拖动状态窗".into());
@@ -643,6 +864,58 @@ pub(crate) fn overlay_drag(window: WebviewWindow) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn layouts_remember_separate_sizes_and_reject_unknown_modes() {
+        let mut prefs = Preferences::default();
+        prefs.width = 380.0;
+        prefs.height = 190.0;
+        prefs.change_layout("expanded").unwrap();
+        assert_eq!((prefs.width, prefs.height), (400.0, 500.0));
+        prefs.width = 450.0;
+        prefs.height = 600.0;
+        prefs.change_layout("compact").unwrap();
+        assert_eq!((prefs.width, prefs.height), (380.0, 190.0));
+        prefs.change_layout("expanded").unwrap();
+        assert_eq!((prefs.width, prefs.height), (450.0, 600.0));
+        assert!(prefs.change_layout("unknown").is_err());
+        let mut restored: Preferences =
+            serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        restored.normalize();
+        assert_eq!(restored.layout, "expanded");
+        assert_eq!(restored.height, 600.0);
+    }
+    #[test]
+    fn team_actions_validate_channel_content_and_member_before_forwarding() {
+        let mut snapshot = Snapshot {
+            connected: true,
+            panel: serde_json::json!({"chatChannelId":"a", "chatConnected":true,
+            "members":[{"volumeIdentity":"u1", "self":false}]}),
+            ..Snapshot::default()
+        };
+        let mut request: ActionRequest = serde_json::from_value(
+            serde_json::json!({"session":"s", "kind":"chat", "channelId":"a", "content":"hello"}),
+        )
+        .unwrap();
+        assert!(validate_action(&snapshot, &request).is_ok());
+        request.channel_id = "b".into();
+        assert!(validate_action(&snapshot, &request).is_err());
+        request.channel_id = "a".into();
+        request.content = "x".repeat(2001);
+        assert!(validate_action(&snapshot, &request).is_err());
+        request.kind = "volume".into();
+        request.identity = "u1".into();
+        request.source = "mic".into();
+        request.value = Some(0.0);
+        assert!(validate_action(&snapshot, &request).is_ok());
+        request.value = Some(301.0);
+        assert!(validate_action(&snapshot, &request).is_err());
+        request.value = Some(100.0);
+        snapshot.reconnecting = true;
+        assert!(validate_action(&snapshot, &request).is_err());
+        snapshot.reconnecting = false;
+        snapshot.panel["members"][0]["self"] = serde_json::json!(true);
+        assert!(validate_action(&snapshot, &request).is_err());
+    }
     #[test]
     fn removed_monitor_position_is_clamped_back_to_work_area() {
         assert_eq!(

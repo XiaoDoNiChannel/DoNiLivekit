@@ -1,61 +1,41 @@
 import { reactive } from 'vue';
+import { themes, legacyThemeIds, normalizeThemeId, normalizeAppearance, THEME_STORAGE_KEY, APPEARANCE_STORAGE_KEY } from '../shared/themes.js';
+export { themes };
 
-const THEME_STORAGE_KEY = 'donichannel_theme_v1';
-
-export const themes = [
-  {
-    id: 'doni-dark',
-    name: 'DoNi Dark',
-    desc: '默认深色，清晰稳定',
-    accent: '#5865f2',
-  },
-  {
-    id: 'midnight-purple',
-    name: 'Midnight Purple',
-    desc: '紫蓝电竞风格',
-    accent: '#8b5cf6',
-  },
-  {
-    id: 'glass-dark',
-    name: 'Glass Dark',
-    desc: '轻毛玻璃浮层',
-    accent: '#22d3ee',
-  },
-  {
-    id: 'soft-graphite',
-    name: 'Soft Graphite',
-    desc: '柔和低对比灰黑',
-    accent: '#f59e0b',
-  },
-];
-
-function safeLoadThemeId() {
-  const saved = localStorage.getItem(THEME_STORAGE_KEY);
-  return themes.some((theme) => theme.id === saved) ? saved : 'doni-dark';
+function readPreference(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
 }
+function readAppearance() {
+  try { return normalizeAppearance(JSON.parse(readPreference(APPEARANCE_STORAGE_KEY))); }
+  catch { return normalizeAppearance(); }
+}
+export const themeStore = reactive({ activeTheme: normalizeThemeId(readPreference(THEME_STORAGE_KEY)), ...readAppearance(), storageError: '' });
 
-export const themeStore = reactive({
-  activeTheme: safeLoadThemeId(),
-});
-
+function savePreference(key, value) {
+  try { localStorage.setItem(key, value); themeStore.storageError = ''; }
+  catch { themeStore.storageError = '当前外观已生效，但无法保存到本机。'; }
+}
 export function applyThemeToDocument(themeId = themeStore.activeTheme) {
-  const nextTheme = themes.some((theme) => theme.id === themeId) ? themeId : 'doni-dark';
-  themeStore.activeTheme = nextTheme;
-
+  themeStore.activeTheme = normalizeThemeId(themeId);
   const root = document.documentElement;
-  themes.forEach((theme) => root.classList.remove(`theme-${theme.id}`));
-  root.classList.add(`theme-${nextTheme}`);
-  root.dataset.theme = nextTheme;
+  [...themes.map(theme => theme.id), ...Object.keys(legacyThemeIds)].forEach(id => root.classList.remove(`theme-${id}`));
+  root.classList.add(`theme-${themeStore.activeTheme}`);
+  root.dataset.theme = themeStore.activeTheme;
+  root.style.colorScheme = getActiveTheme().colorScheme;
+  root.dataset.density = themeStore.density;
+  root.style.setProperty('--dc-glass-opacity', `${themeStore.glassOpacity}%`);
 }
-
 export function setTheme(themeId) {
-  const nextTheme = themes.some((theme) => theme.id === themeId) ? themeId : 'doni-dark';
-  localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
-  applyThemeToDocument(nextTheme);
+  applyThemeToDocument(themeId);
+  savePreference(THEME_STORAGE_KEY, themeStore.activeTheme);
 }
-
+export function setAppearance(values) {
+  const next = normalizeAppearance({ ...themeStore, ...values });
+  Object.assign(themeStore, next);
+  applyThemeToDocument();
+  savePreference(APPEARANCE_STORAGE_KEY, JSON.stringify(next));
+}
 export function getActiveTheme() {
-  return themes.find((theme) => theme.id === themeStore.activeTheme) || themes[0];
+  return themes.find(theme => theme.id === themeStore.activeTheme) || themes[1];
 }
-
-applyThemeToDocument(themeStore.activeTheme);
+applyThemeToDocument();

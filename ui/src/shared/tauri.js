@@ -16,3 +16,23 @@ export const listen = window.__TAURI__?.event?.listen
     };
 
 export const isTauriClient = !!window.__TAURI__;
+
+export async function setNativeWindowTheme(theme) {
+    if (!isTauriClient) return;
+    const current = window.__TAURI__.window.getCurrentWindow();
+    if (current.label === 'main') await current.setTheme(theme);
+}
+
+export function onWindowCloseRequested(handler) {
+    return window.__TAURI__.window.getCurrentWindow().onCloseRequested(handler);
+}
+
+export function minimizeWindow() {
+    return window.__TAURI__.window.getCurrentWindow().minimize();
+}
+
+export function exitApplication() {
+    // Destroying main triggers the existing Rust handler that exits all windows,
+    // including the status overlay, without requesting close a second time.
+    return window.__TAURI__.window.getCurrentWindow().destroy();
+}

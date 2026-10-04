@@ -1,5 +1,9 @@
 /* Shared surface tokens; independent of the main window's layout and legacy IDs. */
-:root { --overlay-surface-rgb: 24, 25, 30; --overlay-text: #f2f3f5; --overlay-muted: #bac0cd; --overlay-accent: #8790ff; --overlay-good: #60d6a3; --overlay-warning: #ffcb75; --overlay-radius: 12px; }
+:root { --overlay-surface-rgb: 24, 25, 30; --overlay-text: #f2f3f5; --overlay-muted: #bac0cd; --overlay-accent: #8790ff; --overlay-good: #60d6a3; --overlay-warning: #ffcb75; --overlay-danger: #ffbec7; --overlay-radius: 12px; }
 :root[data-theme="midnight-purple"] { --overlay-surface-rgb: 28, 20, 41; --overlay-accent: #b39aff; }
 :root[data-theme="glass-dark"] { --overlay-surface-rgb: 16, 32, 38; --overlay-accent: #5cddf5; }
 :root[data-theme="soft-graphite"] { --overlay-surface-rgb: 38, 37, 35; --overlay-accent: #ffcf81; }
+:root[data-theme="graphite"] { --overlay-surface-rgb: 33, 36, 44; --overlay-accent: #b8aff0; }
+:root[data-theme="smoke-glass"] { --overlay-surface-rgb: 36, 44, 58; --overlay-accent: #a9c6fa; }
+:root[data-theme="midnight-blue"] { --overlay-surface-rgb: 20, 34, 53; --overlay-accent: #8fc9fb; }
+:root[data-theme="silver"] { --overlay-surface-rgb: 240, 243, 248; --overlay-text: #202c40; --overlay-muted: #455671; --overlay-accent: #405db3; --overlay-good: #24744f; --overlay-warning: #946113; --overlay-danger: #ad354d; }

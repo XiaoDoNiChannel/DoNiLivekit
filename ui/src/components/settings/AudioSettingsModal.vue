@@ -2,8 +2,10 @@
 import { computed, ref, watch } from 'vue';
 import ProfileSettingsPanel from './ProfileSettingsPanel.vue';
 import OverlaySettingsPanel from './OverlaySettingsPanel.vue';
-import { themes, themeStore, setTheme } from '../../stores/themeStore.js';
+import AppearanceSettingsPanel from './AppearanceSettingsPanel.vue';
+import { UserRound, Settings2, Palette, Headphones, Mic, PictureInPicture2, Info, X } from 'lucide-vue-next';
 import { appStore } from '../../stores/appStore.js';
+import { windowCloseStore } from '../../stores/windowCloseStore.js';
 import { isTauriClient } from '../../shared/tauri.js';
 
 const props = defineProps({
@@ -14,17 +16,19 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(['close', 'switch-mic', 'switch-mic-source', 'switch-output', 'overlay-control', 'overlay-preferences']);
+const emit = defineEmits(['close', 'switch-mic', 'switch-mic-source', 'switch-output', 'overlay-control', 'overlay-preferences', 'window-close-preference']);
 
 const activeTab = ref('profile');
 watch(() => props.open, open => { if (open) activeTab.value = props.initialTab; });
 
 const settingsTabs = [
-  { id: 'profile', icon: '👤', title: '我的资料', desc: '头像、昵称、状态' },
-  { id: 'devices', icon: '🎧', title: '音频设备', desc: '麦克风与扬声器' },
-  { id: 'mic', icon: '🎙️', title: '麦克风处理', desc: '阈值、增益、降噪' },
-  { id: 'overlay', icon: '▣', title: '游戏浮窗', desc: '状态、透明度、快捷键' },
-  { id: 'about', icon: 'ℹ️', title: '关于', desc: '版本和使用建议' },
+  { id: 'profile', icon: UserRound, title: '我的资料', desc: '头像、昵称、状态' },
+  { id: 'appearance', icon: Palette, title: '外观', desc: '主题、材质与间距' },
+  { id: 'general', icon: Settings2, title: '常规', desc: '窗口关闭行为' },
+  { id: 'devices', icon: Headphones, title: '音频设备', desc: '麦克风与扬声器' },
+  { id: 'mic', icon: Mic, title: '麦克风处理', desc: '阈值、增益、降噪' },
+  { id: 'overlay', icon: PictureInPicture2, title: '游戏浮窗', desc: '状态、透明度、快捷键' },
+  { id: 'about', icon: Info, title: '关于', desc: '版本和使用建议' },
 ];
 
 const activeTabInfo = computed(() => {
@@ -35,11 +39,6 @@ function closeModal() {
   emit('close');
 }
 
-const activeThemeId = computed(() => themeStore.activeTheme);
-
-function chooseTheme(themeId) {
-  setTheme(themeId);
-}
 </script>
 
 <template>
@@ -52,6 +51,7 @@ function chooseTheme(themeId) {
     class="modal audio-settings-modal modern-settings-modal"
     :class="{ hidden: !props.open }"
     @click.self="closeModal"
+    @keydown.esc="closeModal"
   >
     <section class="modal-card settings-card settings-center-card">
       <header class="modal-header settings-header settings-center-header">
@@ -59,7 +59,7 @@ function chooseTheme(themeId) {
           <div class="modal-title">设置中心</div>
           <div class="settings-subtitle">管理个人资料、音频设备、麦克风处理与界面偏好</div>
         </div>
-        <button class="modal-close" title="关闭" @click="closeModal">×</button>
+        <button class="modal-close" aria-label="关闭设置" @click="closeModal"><X :size="20" /></button>
       </header>
 
       <div class="settings-center-layout">
@@ -72,7 +72,7 @@ function chooseTheme(themeId) {
             :class="{ active: activeTab === tab.id }"
             @click="activeTab = tab.id"
           >
-            <span class="settings-nav-icon">{{ tab.icon }}</span>
+            <span class="settings-nav-icon"><component :is="tab.icon" :size="18" /></span>
             <span class="settings-nav-copy">
               <span class="settings-nav-title">{{ tab.title }}</span>
               <span class="settings-nav-desc">{{ tab.desc }}</span>
@@ -80,16 +80,33 @@ function chooseTheme(themeId) {
           </button>
         </aside>
 
-        <main class="settings-content-panel">
+        <main class="settings-content-panel" :class="{ 'appearance-content': activeTab === 'appearance' }">
           <div class="settings-page-heading">
-            <div class="settings-page-kicker">{{ activeTabInfo.icon }} {{ activeTabInfo.title }}</div>
+            <div class="settings-page-kicker"><component :is="activeTabInfo.icon" :size="17" /> {{ activeTabInfo.title }}</div>
             <div class="settings-page-desc">{{ activeTabInfo.desc }}</div>
           </div>
 
           <div class="settings-page-stack">
+            <AppearanceSettingsPanel v-show="activeTab === 'appearance'" />
             <div v-show="activeTab === 'profile'" class="settings-tab-panel profile-tab-panel">
               <ProfileSettingsPanel />
             </div>
+
+            <section v-show="activeTab === 'general'" class="settings-section settings-page-section">
+              <div class="settings-section-title">窗口行为</div>
+              <label class="settings-field modern-settings-field">
+                <span>关闭主窗口时</span>
+                <select :value="windowCloseStore.preference" :disabled="!isTauriClient || windowCloseStore.busy" aria-describedby="window-close-setting-hint" @change="emit('window-close-preference', $event.target.value); $event.target.value = windowCloseStore.preference">
+                  <option value="ask">每次询问</option>
+                  <option value="minimize">最小化到任务栏</option>
+                  <option value="exit">退出程序</option>
+                </select>
+              </label>
+              <p id="window-close-setting-hint" class="settings-section-desc">选择后自动保存，下次启动仍然生效。选择“每次询问”可恢复关闭确认弹窗。</p>
+              <p class="settings-section-desc">最小化会保持语音和共享；退出程序会结束通话和共享。</p>
+              <p v-if="!isTauriClient" class="settings-section-desc">此设置仅在桌面客户端中可用。</p>
+              <p v-if="windowCloseStore.preferenceError" role="alert" class="workspace-action-error">{{ windowCloseStore.preferenceError }}</p>
+            </section>
 
             <section v-show="activeTab === 'devices'" class="settings-section settings-page-section">
               <div class="settings-section-title">输入 / 输出设备</div>

@@ -346,7 +346,7 @@ function addMentionCandidate(list, raw = {}, extra = {}) {
     identity: cleanMentionText(raw.identity || raw.senderIdentity || profile?.identity || raw.senderId || raw.userId || id),
     connectionId: cleanMentionText(raw.connectionId || profile?.connectionId || ''),
     displayName,
-    avatarColor: raw.avatarColor || raw.senderColor || profile?.avatarColor || '#5865f2',
+    avatarColor: raw.avatarColor || raw.senderColor || profile?.avatarColor || 'var(--dc-accent)',
     avatarPreset: raw.avatarPreset || raw.senderPreset || profile?.avatarPreset || '',
     avatarUrl: raw.avatarUrl ?? raw.senderAvatarUrl ?? profile?.avatarUrl ?? null,
     isSelf: !!extra.isSelf,
@@ -1102,13 +1102,13 @@ function formatFullTime(ts) {
 </script>
 
 <template>
-  <aside class="chat-panel-vue flex flex-col h-full bg-[#1e1f22] border-l border-white/5">
+  <aside class="chat-panel-vue flex flex-col h-full bg-[var(--dc-bg-input)] border-l border-[var(--dc-border-subtle)]">
     <!-- 顶部标题栏 -->
-    <header class="flex items-center gap-2 px-4 py-3 border-b border-white/5 shrink-0">
+    <header class="flex items-center gap-2 px-4 py-3 border-b border-[var(--dc-border-subtle)] shrink-0">
       <MessageSquare :size="17" aria-hidden="true" />
       <div class="flex-1 min-w-0">
-        <div class="text-[#f2f3f5] font-semibold text-sm leading-none truncate">房间聊天</div>
-        <div class="text-[#6d6f78] text-xs mt-0.5">频道内可见</div>
+        <div class="text-[var(--dc-text-main)] font-semibold text-sm leading-none truncate">房间聊天</div>
+        <div class="text-[var(--dc-text-muted)] text-xs mt-0.5">频道内可见</div>
       </div>
     </header>
 
@@ -1120,16 +1120,16 @@ function formatFullTime(ts) {
     >
       <!-- 空状态 -->
       <div v-if="groupedMessages.length === 0" class="flex flex-col items-center justify-center h-full gap-3 pb-8">
-        <div class="w-16 h-16 rounded-full bg-[#2b2d31] flex items-center justify-center text-3xl">💬</div>
-        <div class="text-[#f2f3f5] font-semibold text-base">欢迎来到 {{ channelName }}</div>
-        <div class="text-[#6d6f78] text-sm text-center max-w-[200px]">这是频道的开始，发送第一条消息吧！</div>
+        <div class="w-16 h-16 rounded-full bg-[var(--dc-bg-panel-solid)] flex items-center justify-center text-3xl">💬</div>
+        <div class="text-[var(--dc-text-main)] font-semibold text-base">欢迎来到 {{ channelName }}</div>
+        <div class="text-[var(--dc-text-muted)] text-sm text-center max-w-[200px]">这是频道的开始，发送第一条消息吧！</div>
       </div>
 
       <!-- 消息气泡 -->
       <div
         v-for="(msg, idx) in groupedMessages"
         :key="msg.id"
-        class="msg-row group relative flex items-start gap-3 px-2 py-0.5 rounded hover:bg-white/[0.04] transition-colors duration-100"
+        class="msg-row group relative flex items-start gap-3 px-2 py-0.5 rounded hover:bg-[var(--dc-hover)] transition-colors duration-100"
         :class="{ 'mt-4': !msg.isGrouped, 'mt-0.5': msg.isGrouped, 'msg-row-mentioned': isMentionedMessage(msg) }"
         @mouseenter="onMsgMouseenter(msg.id)"
         @mouseleave="onMsgMouseleave"
@@ -1151,7 +1151,7 @@ function formatFullTime(ts) {
           <!-- 折叠时显示时间（hover 才显示） -->
           <span
             v-else
-            class="text-[10px] text-[#4e5058] leading-none mt-1 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
+            class="text-[10px] text-[var(--dc-text-muted)] leading-none mt-1 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
             :title="formatFullTime(msg.timestamp)"
           >{{ formatTime(msg.timestamp) }}</span>
         </div>
@@ -1161,28 +1161,28 @@ function formatFullTime(ts) {
           <!-- 发送者昵称 + 时间（非折叠时显示） -->
           <div v-if="!msg.isGrouped" class="flex items-baseline gap-2 mb-1">
             <span
-              class="font-semibold text-sm leading-none cursor-pointer"
-              :class="msg.isSelf ? 'text-[#5865f2]' : 'text-[#f2f3f5]'"
+              class="chat-sender font-semibold text-sm leading-none cursor-pointer"
+              :class="msg.isSelf ? 'text-[var(--dc-accent)]' : 'text-[var(--dc-text-main)]'"
               :style="!msg.isSelf && msg.senderColor ? { color: msg.senderColor } : {}"
               title="右键 @ 这个成员"
               @contextmenu.stop.prevent="insertMentionFromMessage(msg)"
             >{{ msg.senderName }}</span>
-            <span v-if="msg.isSelf" class="text-[10px] text-[#5865f2] bg-[#5865f2]/10 px-1 rounded leading-none py-0.5">我</span>
-            <span class="text-[11px] text-[#4e5058]" :title="formatFullTime(msg.timestamp)">{{ formatTime(msg.timestamp) }}</span>
+            <span v-if="msg.isSelf" class="text-[10px] text-[var(--dc-accent)] bg-[var(--dc-accent)]/10 px-1 rounded leading-none py-0.5">我</span>
+            <span class="text-[11px] text-[var(--dc-text-muted)]" :title="formatFullTime(msg.timestamp)">{{ formatTime(msg.timestamp) }}</span>
           </div>
 
           <!-- 正文（v-html 富文本渲染） -->
           <!-- eslint-disable-next-line vue/no-v-html -->
           <div
-            class="block w-full max-w-full text-[#dcddde] text-sm leading-relaxed whitespace-pre-wrap break-words msg-content"
+            class="block w-full max-w-full text-[var(--dc-text-normal)] text-sm leading-relaxed whitespace-pre-wrap break-words msg-content"
             v-html="renderContent(msg.content)"
             @click="onMessageContentClick"
           />
 
-          <span v-if="msg.isSelf && msg.status === 'sending'" class="text-xs text-[#949ba4]">发送中…</span>
+          <span v-if="msg.isSelf && msg.status === 'sending'" class="text-xs text-[var(--dc-text-muted)]">发送中…</span>
           <button
             v-if="msg.isSelf && msg.status === 'failed'"
-            class="text-xs text-[#f23f42] hover:underline disabled:opacity-50"
+            class="text-xs text-[var(--dc-danger)] hover:underline disabled:opacity-50"
             :disabled="!isConnected"
             @click.stop="emit('retry', msg.clientMessageId)"
           >发送未确认，点击重试</button>
@@ -1194,8 +1194,8 @@ function formatFullTime(ts) {
               :key="emoji"
               class="reaction-btn flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border transition-all duration-150"
               :class="isMineReaction(msg.reactions, emoji)
-                ? 'bg-[#5865f2]/20 border-[#5865f2]/60 text-[#5865f2]'
-                : 'bg-white/5 border-white/10 text-[#b5bac1] hover:bg-white/10 hover:border-white/20'"
+                ? 'bg-[var(--dc-accent)]/20 border-[var(--dc-accent)]/60 text-[var(--dc-accent)]'
+                : 'bg-white/5 border-[var(--dc-border-subtle)] text-[var(--dc-text-normal)] hover:bg-[var(--dc-hover)] hover:border-white/20'"
               :title="reactionTitle(users, emoji)"
               @click="handleReaction(msg.id, emoji)"
             >
@@ -1210,31 +1210,31 @@ function formatFullTime(ts) {
         <!-- Reaction 选择器（气泡） -->
         <div
           v-if="reactionPickerMsgId === msg.id"
-          :class="['reaction-picker absolute right-2 z-50 bg-[#2b2d31] border border-white/10 rounded-xl p-2 shadow-2xl w-64', idx < 3 ? 'top-full mt-1' : 'bottom-full mb-1']"
+          :class="['reaction-picker absolute right-2 z-50 bg-[var(--dc-bg-panel-solid)] border border-[var(--dc-border-subtle)] rounded-xl p-2 shadow-2xl w-64', idx < 3 ? 'top-full mt-1' : 'bottom-full mb-1']"
         >
-          <div class="text-[10px] text-[#6d6f78] mb-1.5 px-1">选择回应</div>
+          <div class="text-[10px] text-[var(--dc-text-muted)] mb-1.5 px-1">选择回应</div>
           <div class="grid grid-cols-8 gap-0.5">
             <button
               v-for="qr in QUICK_REACTIONS"
               :key="qr.name"
-              class="w-8 h-8 flex items-center justify-center text-lg rounded hover:bg-white/10 transition-colors"
+              class="w-8 h-8 flex items-center justify-center text-lg rounded hover:bg-[var(--dc-hover)] transition-colors"
               :title="`:${qr.name}:`"
               @click.stop="handleReaction(msg.id, qr.char)"
             >{{ qr.char }}</button>
           </div>
-          <div class="border-t border-white/10 mt-2 pt-2">
+          <div class="border-t border-[var(--dc-border-subtle)] mt-2 pt-2">
             <div class="grid grid-cols-8 gap-0.5 max-h-32 overflow-y-auto custom-scroll">
               <button
                 v-for="e in EMOJI_LIST.slice(0, 64)"
                 :key="e.name"
-                class="w-8 h-8 flex items-center justify-center text-base rounded hover:bg-white/10 transition-colors"
+                class="w-8 h-8 flex items-center justify-center text-base rounded hover:bg-[var(--dc-hover)] transition-colors"
                 :title="e.label"
                 @click.stop="handleReaction(msg.id, e.char)"
               >{{ e.char }}</button>
             </div>
           </div>
           <button
-            class="mt-2 w-full text-[11px] text-[#6d6f78] hover:text-[#b5bac1] transition-colors text-center"
+            class="mt-2 w-full text-[11px] text-[var(--dc-text-muted)] hover:text-[var(--dc-text-normal)] transition-colors text-center"
             @click.stop="closeReactionPicker"
           >关闭</button>
         </div>
@@ -1243,7 +1243,7 @@ function formatFullTime(ts) {
       <!-- 新消息提示按钮 -->
       <button
         v-if="!isAtBottom && messages.length > 0"
-        class="sticky bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-[#5865f2] text-white text-xs font-medium px-3 py-1.5 rounded-full shadow-lg hover:bg-[#4752c4] transition-colors z-10"
+        class="sticky bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-[var(--dc-accent)] text-[var(--dc-accent-contrast)] text-xs font-medium px-3 py-1.5 rounded-full shadow-lg hover:bg-[var(--dc-accent)] transition-colors z-10"
         @click="jumpToLatestMessage"
       >
         <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
@@ -1255,23 +1255,23 @@ function formatFullTime(ts) {
 
     <!-- 输入区 -->
     <div class="px-3 pb-3 pt-2 shrink-0">
-      <div class="relative flex flex-col bg-[#383a40] rounded-xl border border-white/5 focus-within:border-[#5865f2]/50 transition-colors overflow-visible">
+      <div class="chat-composer-surface relative flex flex-col bg-[var(--dc-bg-panel-solid)] rounded-xl border border-[var(--dc-border-subtle)] focus-within:border-[var(--dc-accent)]/50 transition-colors overflow-visible">
         <div
           v-if="showMentionMenu"
-          class="mention-picker absolute left-2 right-2 bottom-full mb-2 bg-[#2b2d31] border border-white/10 rounded-xl shadow-2xl z-50 overflow-hidden"
+          class="mention-picker absolute left-2 right-2 bottom-full mb-2 bg-[var(--dc-bg-panel-solid)] border border-[var(--dc-border-subtle)] rounded-xl shadow-2xl z-50 overflow-hidden"
           @mousedown.prevent
         >
-          <div class="px-3 py-2 text-[11px] font-semibold text-[#949ba4] border-b border-white/5">选择要 @ 的成员</div>
+          <div class="px-3 py-2 text-[11px] font-semibold text-[var(--dc-text-muted)] border-b border-[var(--dc-border-subtle)]">选择要 @ 的成员</div>
           <div
             v-if="mentionMenuCandidates.length === 0"
-            class="px-3 py-3 text-xs text-[#6d6f78]"
+            class="px-3 py-3 text-xs text-[var(--dc-text-muted)]"
           >当前没有可提及成员</div>
           <button
             v-for="(candidate, index) in mentionMenuCandidates"
             :key="candidate.id + '-' + candidate.displayName"
             type="button"
             class="mention-candidate w-full flex items-center gap-2 px-3 py-2 text-left transition-colors"
-            :class="index === mentionActiveIndex ? 'bg-[#5865f2]/20 text-white' : 'text-[#dbdee1] hover:bg-white/5'"
+            :class="index === mentionActiveIndex ? 'bg-[var(--dc-accent-soft)] text-[var(--dc-text-main)]' : 'text-[var(--dc-text-normal)] hover:bg-[var(--dc-hover)]'"
             @mouseenter="mentionActiveIndex = index"
             @click.stop="insertMentionCandidate(candidate)"
           >
@@ -1283,10 +1283,10 @@ function formatFullTime(ts) {
               size="sm"
             />
             <div class="min-w-0 flex-1">
-              <div class="text-sm font-semibold truncate">@{{ candidate.displayName }} <span v-if="candidate.isSelf" class="text-[10px] text-[#949ba4] font-normal">我</span></div>
-              <div class="text-[10px] text-[#6d6f78] truncate">{{ candidate.userId || candidate.identity }}</div>
+              <div class="text-sm font-semibold truncate">@{{ candidate.displayName }} <span v-if="candidate.isSelf" class="text-[10px] text-[var(--dc-text-muted)] font-normal">我</span></div>
+              <div class="text-[10px] text-[var(--dc-text-muted)] truncate">{{ candidate.userId || candidate.identity }}</div>
             </div>
-            <div class="text-[10px] text-[#6d6f78]">Enter</div>
+            <div class="text-[10px] text-[var(--dc-text-muted)]">Enter</div>
           </button>
         </div>
 
@@ -1294,12 +1294,12 @@ function formatFullTime(ts) {
           <div
             v-for="item in pendingImages"
             :key="item.id"
-            class="pending-image-card relative w-16 h-16 rounded-lg overflow-hidden bg-black/20 border border-white/10 shrink-0"
+            class="pending-image-card relative w-16 h-16 rounded-lg overflow-hidden bg-black/20 border border-[var(--dc-border-subtle)] shrink-0"
             :title="item.name"
           >
             <img :src="item.previewUrl" alt="待发送图片" class="w-full h-full object-cover">
             <button
-              class="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/70 text-white text-sm leading-none hover:bg-[#f23f42] transition-colors"
+              class="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/70 text-white text-sm leading-none hover:bg-[var(--dc-danger)] transition-colors"
               title="移除图片"
               @click.stop="removePendingImage(item.id)"
             >×</button>
@@ -1311,7 +1311,7 @@ function formatFullTime(ts) {
         <textarea
           ref="textareaEl"
           v-model="inputText"
-          class="chat-composer-textarea flex-1 bg-transparent text-[#dcddde] text-sm placeholder-[#4e5058] px-4 py-3 resize-none leading-relaxed outline-none min-h-[44px]"
+          class="chat-composer-textarea flex-1 bg-transparent text-[var(--dc-text-normal)] text-sm placeholder-[var(--dc-text-muted)] px-4 py-3 resize-none leading-relaxed outline-none min-h-[44px]"
           :placeholder="isUploadingImage ? '图片上传中...' : (isConnected ? `发送消息到 #${channelName}...` : '未连接，无法发送消息')"
           :disabled="!isConnected"
           rows="1"
@@ -1340,8 +1340,8 @@ function formatFullTime(ts) {
           <button
             class="w-8 h-8 flex items-center justify-center rounded transition-colors"
             :class="isConnected && !isUploadingImage
-              ? 'text-[#b5bac1] hover:bg-white/10 hover:text-white'
-              : 'text-[#4e5058] cursor-not-allowed'"
+              ? 'text-[var(--dc-text-normal)] hover:bg-[var(--dc-hover)] hover:text-[var(--dc-text-main)]'
+              : 'text-[var(--dc-text-muted)] cursor-not-allowed'"
             :disabled="!isConnected || isUploadingImage"
             :title="isUploadingImage ? '图片上传中...' : '发送图片'"
             @click.stop="openImagePicker"
@@ -1349,7 +1349,7 @@ function formatFullTime(ts) {
 
           <!-- Emoji 按钮 -->
           <button
-            class="emoji-toggle-btn w-8 h-8 flex items-center justify-center text-[#b5bac1] rounded hover:bg-white/10 hover:text-white transition-colors text-lg"
+            class="emoji-toggle-btn w-8 h-8 flex items-center justify-center text-[var(--dc-text-normal)] rounded hover:bg-[var(--dc-hover)] hover:text-[var(--dc-text-main)] transition-colors text-lg"
             title="插入表情"
             @click.stop="showEmojiPicker = !showEmojiPicker"
           ><Smile :size="18" /></button>
@@ -1359,8 +1359,8 @@ function formatFullTime(ts) {
           <button
             class="w-8 h-8 flex items-center justify-center rounded transition-all duration-150"
             :class="(inputText.trim() || pendingImages.length > 0) && isConnected && !isUploadingImage
-              ? 'bg-[#5865f2] text-white hover:bg-[#4752c4] shadow-[0_0_12px_rgba(88,101,242,0.4)]'
-              : 'bg-white/5 text-[#4e5058] cursor-not-allowed'"
+              ? 'bg-[var(--dc-accent)] text-[var(--dc-accent-contrast)] hover:bg-[var(--dc-accent)]'
+              : 'bg-white/5 text-[var(--dc-text-muted)] cursor-not-allowed'"
             :disabled="(!inputText.trim() && pendingImages.length === 0) || !isConnected || isUploadingImage"
             title="发送 (Enter)"
             @click="handleSend"
@@ -1374,11 +1374,11 @@ function formatFullTime(ts) {
       <!-- Emoji 选择器浮层 -->
       <div
         v-if="showEmojiPicker"
-        class="emoji-picker absolute bottom-20 right-4 w-72 bg-[#2b2d31] border border-white/10 rounded-xl shadow-2xl z-50 p-3"
+        class="emoji-picker absolute bottom-20 right-4 w-72 bg-[var(--dc-bg-panel-solid)] border border-[var(--dc-border-subtle)] rounded-xl shadow-2xl z-50 p-3"
       >
         <input
           v-model="emojiSearch"
-          class="w-full bg-[#1e1f22] text-[#dcddde] text-sm px-3 py-1.5 rounded-lg border border-white/10 outline-none placeholder-[#4e5058] mb-2"
+          class="w-full bg-[var(--dc-bg-input)] text-[var(--dc-text-normal)] text-sm px-3 py-1.5 rounded-lg border border-[var(--dc-border-subtle)] outline-none placeholder-[var(--dc-text-muted)] mb-2"
           placeholder="搜索表情..."
           @click.stop
         >
@@ -1386,7 +1386,7 @@ function formatFullTime(ts) {
           <button
             v-for="e in filteredEmoji"
             :key="e.name"
-            class="w-8 h-8 flex items-center justify-center text-xl rounded hover:bg-white/10 transition-colors"
+            class="w-8 h-8 flex items-center justify-center text-xl rounded hover:bg-[var(--dc-hover)] transition-colors"
             :title="e.label"
             @click.stop="insertEmoji(e.char)"
           >{{ e.char }}</button>
@@ -1400,7 +1400,7 @@ function formatFullTime(ts) {
           :key="btn.markup"
           :title="btn.title"
           class="w-7 h-7 flex items-center justify-center text-xs rounded transition-colors"
-          :class="[btn.activeClass, 'text-[#6d6f78] hover:text-[#dbdee1] hover:bg-white/10']"
+          :class="[btn.activeClass, 'text-[var(--dc-text-muted)] hover:text-[var(--dc-text-normal)] hover:bg-[var(--dc-hover)]']"
           @click="applyFormatting(btn.markup)"
         >{{ btn.label }}</button>
         <div class="flex-1"></div>
@@ -1408,7 +1408,7 @@ function formatFullTime(ts) {
 
       <div class="flex items-center justify-between mt-1 px-1">
         <span class="composer-hint" title="Enter 发送 · Shift+Enter 换行 · @ 提及成员 · Ctrl+V 添加图片">Enter 发送 · Shift+Enter 换行</span>
-        <span v-if="messages.length > 0" class="text-[10px] text-[#4e5058]">{{ messages.length }} 条消息</span>
+        <span v-if="messages.length > 0" class="text-[10px] text-[var(--dc-text-muted)]">{{ messages.length }} 条消息</span>
       </div>
     </div>
     <!-- 图片预览浮层 -->
@@ -1469,8 +1469,8 @@ function formatFullTime(ts) {
 /* 自定义滚动条 */
 .custom-scroll::-webkit-scrollbar { width: 4px; }
 .custom-scroll::-webkit-scrollbar-track { background: transparent; }
-.custom-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
-.custom-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+.custom-scroll::-webkit-scrollbar-thumb { background: var(--dc-hover); border-radius: 4px; }
+.custom-scroll::-webkit-scrollbar-thumb:hover { background: var(--dc-border-subtle); }
 
 /* 富文本消息内容样式 */
 .msg-row {
@@ -1491,35 +1491,35 @@ function formatFullTime(ts) {
   word-break: normal;
   overflow-wrap: anywhere;
 }
-:deep(.msg-content strong) { color: #f2f3f5; font-weight: 700; }
-:deep(.msg-content em) { font-style: italic; color: #f2f3f5; }
-:deep(.msg-content del) { text-decoration: line-through; color: #6d6f78; }
+:deep(.msg-content strong) { color: var(--dc-text-main); font-weight: 700; }
+:deep(.msg-content em) { font-style: italic; color: var(--dc-text-main); }
+:deep(.msg-content del) { text-decoration: line-through; color: var(--dc-text-muted); }
 :deep(.msg-content a.msg-link) {
-  color: #00aff4;
+  color: var(--dc-link);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-:deep(.msg-content a.msg-link:hover) { color: #00c0ff; }
+:deep(.msg-content a.msg-link:hover) { color: var(--dc-link); }
 :deep(.msg-content .msg-inline-code) {
   font-family: 'Consolas', 'Courier New', monospace;
   font-size: 0.85em;
-  background: rgba(30, 31, 34, 0.6);
-  border: 1px solid rgba(255,255,255,0.1);
+  background: var(--dc-bg-input);
+  border: 1px solid var(--dc-border-subtle);
   border-radius: 3px;
   padding: 0.1em 0.35em;
-  color: #e3e5e8;
+  color: var(--dc-text-normal);
 }
 :deep(.msg-content .msg-code-block) {
   font-family: 'Consolas', 'Courier New', monospace;
   font-size: 0.82em;
-  background: #1e1f22;
-  border: 1px solid rgba(255,255,255,0.1);
+  background: var(--dc-bg-input);
+  border: 1px solid var(--dc-border-subtle);
   border-radius: 6px;
   padding: 10px 14px;
   margin: 6px 0;
   overflow-x: auto;
   white-space: pre;
-  color: #e3e5e8;
+  color: var(--dc-text-normal);
 }
 :deep(.msg-content .msg-emoji) {
   font-size: 1.2em;
@@ -1527,23 +1527,23 @@ function formatFullTime(ts) {
   display: inline-block;
 }
 :deep(.msg-content .msg-mention) {
-  background: rgba(88, 101, 242, 0.2);
-  color: #c9cdfb;
+  background: var(--dc-accent-soft);
+  color: var(--dc-accent);
   border-radius: 3px;
   padding: 0 2px;
   cursor: pointer;
 }
-:deep(.msg-content .msg-mention:hover) { background: rgba(88, 101, 242, 0.35); }
+:deep(.msg-content .msg-mention:hover) { background: var(--dc-accent-soft); }
 :deep(.msg-content .msg-mention-self) {
-  background: rgba(250, 166, 26, 0.22);
-  color: #ffd37a;
+  background: color-mix(in srgb, var(--dc-warning) 15%, transparent);
+  color: var(--dc-warning);
   box-shadow: inset 0 0 0 1px rgba(250, 166, 26, 0.28);
 }
 :deep(.msg-content .msg-mention-weak) {
-  color: #9da8ff;
+  color: var(--dc-accent);
 }
 :deep(.msg-content .msg-spoiler) {
-  background: #1e1f22;
+  background: var(--dc-bg-input);
   color: transparent;
   border-radius: 3px;
   padding: 0 2px;
@@ -1552,8 +1552,8 @@ function formatFullTime(ts) {
   transition: color 0.2s, background 0.2s;
 }
 :deep(.msg-content .msg-spoiler:hover) {
-  background: rgba(255,255,255,0.08);
-  color: #dcddde;
+  background: var(--dc-hover);
+  color: var(--dc-text-normal);
 }
 
 

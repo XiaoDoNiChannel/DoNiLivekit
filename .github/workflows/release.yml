@@ -27,6 +27,13 @@ jobs:
       - name: Install root Tauri CLI dependencies
         run: npm ci
 
+      - name: Verify updater signing key matches client public key
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: .\scripts\Test-UpdaterSigningKey.ps1
+
       - name: Install frontend dependencies
         working-directory: ui
         run: npm ci
@@ -43,28 +50,35 @@ jobs:
             throw "Version mismatch: tag=$tagVersion tauri=$tauriVersion cargo=$cargoVersion ui=$uiVersion root=$rootVersion"
           }
 
-      - name: Read release notes
-        id: release_notes
+      - name: Build and sign portable EXE
         shell: pwsh
-        run: |
-          $delimiter = "NOTES_$([guid]::NewGuid().ToString('N'))"
-          "body<<$delimiter" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Get-Content RELEASE_NOTES.md -Encoding utf8 | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          $delimiter | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Build, sign, and upload NSIS release
-        uses: tauri-apps/tauri-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "DoNiChannel ${{ github.ref_name }}"
-          releaseBody: ${{ steps.release_notes.outputs.body }}
-          releaseDraft: true
-          prerelease: false
-          uploadUpdaterJson: true
-          uploadUpdaterSignatures: true
-          updaterJsonPreferNsis: true
-          args: --bundles nsis
+        run: .\scripts\Build-PortableRelease.ps1
+
+      - name: Smoke test portable updater helper
+        shell: pwsh
+        run: .\tests\portable_update_smoke.ps1
+
+      - name: Upload portable assets to draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $assets = @(
+            "release-assets/$tag/DoNiChannel.exe",
+            "release-assets/$tag/DoNiChannel.exe.sig",
+            "release-assets/$tag/latest-portable.json"
+          )
+          $existing = & gh release view $tag --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($existing | ConvertFrom-Json).isDraft) {
+              throw "Refusing to overwrite a published release. Use a new version."
+            }
+            & gh release upload $tag @assets --clobber
+          } else {
+            & gh release create $tag @assets --verify-tag --draft --title "DoNiChannel $tag" --notes-file RELEASE_NOTES.md
+          }
+          if ($LASTEXITCODE -ne 0) { throw "GitHub Release upload failed" }

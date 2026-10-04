@@ -155,21 +155,17 @@ cargo test --locked
 
 ## 自动更新与发布
 
-客户端默认使用中心服务器 `10.126.126.67:5000`，在启动、连接成功和每四小时静默检查：
+客户端在启动、连接成功和每四小时通过 GitHub Releases 静默检查：
 
 ```text
-GET {server}/api/update/{target}/{arch}/{current_version}
+https://github.com/XiaoDoNiChannel/DoNiLivekit/releases/latest/download/latest-portable.json
 ```
 
-无更新返回 204；有更新时 FastAPI 从 `downloads/latest.json` 读取签名清单，并把下载地址指向同一局域网服务器。可用 `DONICHANNEL_DOWNLOADS_DIR` 指定发布目录，用 `DONICHANNEL_UPDATE_BASE_URL` 预留国内对象存储/CDN 地址。GitHub Releases 仅作为归档和备用来源。
+客户端发布为免安装的 `DoNiChannel.exe`，用户下载后直接运行。电脑需要已安装 WebView2 Runtime，程序应放在当前用户有写权限的文件夹。设置继续保存在原用户数据目录，不随 EXE 移动。
 
-有更新时客户端右下角显示版本、更新说明、下载进度和安装按钮。中心服务器部署新版本可运行：
+有更新时，点击“更新并重启”下载并验证新 EXE。临时更新助手等待程序退出，备份旧文件、替换 EXE 并重启；替换或启动失败时尝试恢复旧文件。GitHub 超时时，可从群文件下载新版 EXE，关闭程序后手动替换。
 
-```powershell
-.\scripts\Publish-LanUpdate.ps1 -SourceDirectory "D:\release\v0.2.0"
-```
-
-继续使用本地 Tauri 构建时，可用 `.\scripts\Build-LanRelease.ps1` 代替直接执行 `npx tauri build`；它会在正常构建后补齐局域网发布需要的 `latest.json`。
+GitHub Actions 生成 Draft Release，包含 `DoNiChannel.exe`、`DoNiChannel.exe.sig`、`latest-portable.json`。检查产物后点击 `Publish release` 才会启用自动更新。旧安装版（包括 0.1.4）需手动下载并运行首个免安装版一次，之后使用新的更新频道；不要向旧版 `latest.json` 发布普通 EXE。
 
 发布由 `.github/workflows/release.yml` 在 `v*.*.*` tag 上触发。创建 tag 前，必须把 `src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、根 `package.json` 和 `ui/package.json` 的版本同步；CI 会拒绝版本不一致的发布。仓库只保存 updater 公钥，私钥和密码必须配置为 GitHub Secrets：
 
