@@ -19,8 +19,9 @@ export default defineConfig({
     },
   },
   server: {
-    host: '0.0.0.0',
+    host: '127.0.0.1',
     port: 5173,
-    strictPort: false,
+    // Must match Tauri devUrl; silently picking another port opens the wrong page.
+    strictPort: true,
   },
 });

@@ -1,6 +1,7 @@
 mod audio;
 mod commands;
 mod error;
+mod portable_update;
 mod state;
 mod transport;
 
@@ -12,12 +13,16 @@ use commands::devices::{
 use commands::microphone::{set_mic_boost, set_mic_vad_threshold, toggle_rust_mic};
 use commands::overlay;
 use commands::process_audio::{get_active_processes, start_capture, start_capture_multi};
+use commands::soundboard;
 use commands::updater::{check_for_update, install_update};
 use state::AppState;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if portable_update::handle_startup() {
+        return;
+    }
     if let Err(error) = tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -28,6 +33,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState::new())
         .manage(overlay::OverlayState::default())
+        .manage(soundboard::SoundboardState::default())
         .setup(|app| {
             overlay::init(app.handle());
             let state = app.state::<AppState>();
@@ -78,7 +84,14 @@ pub fn run() {
             overlay::overlay_publish,
             overlay::overlay_mic,
             overlay::overlay_mic_result,
+            overlay::overlay_action,
+            overlay::overlay_action_result,
             overlay::overlay_drag,
+            soundboard::soundboard_list,
+            soundboard::soundboard_read,
+            soundboard::soundboard_import,
+            soundboard::soundboard_remove,
+            soundboard::soundboard_bind,
         ])
         .run(tauri::generate_context!())
     {

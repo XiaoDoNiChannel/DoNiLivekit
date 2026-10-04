@@ -16,11 +16,11 @@ const visible = computed(() => {
     && dismissedVersion.value !== updateStore.version;
 });
 const progressLabel = computed(() => {
-  if (updateStore.status === 'installing') return '正在安装，应用将自动重启…';
+  if (updateStore.status === 'installing') return '正在准备替换程序，应用将自动重启…';
   if (updateStore.progressPercent != null) {
     return `正在下载 ${Math.round(updateStore.progressPercent)}%`;
   }
-  return '正在下载安装包…';
+  return '正在下载新版 EXE…';
 });
 const progressStyle = computed(() => ({
   width: `${Math.max(2, Number(updateStore.progressPercent || 0))}%`,
@@ -41,7 +41,7 @@ async function install() {
   try {
     await installAvailableUpdate();
   } catch (error) {
-    actionError.value = String(error?.message || error || '安装更新失败');
+    actionError.value = String(error?.message || error || '更新失败');
   }
 }
 
@@ -84,7 +84,7 @@ async function retryCheck() {
       <p v-else class="update-notice-notes empty">此版本未提供更新说明。</p>
 
       <p class="update-notice-fallback">
-        如果 GitHub 下载超时，可在群文件内下载对应版本安装包。
+        如果 GitHub 下载超时，可在群文件内下载新版 EXE；关闭程序后替换原文件即可。
       </p>
 
       <div v-if="busy" class="update-progress-wrap">
@@ -95,7 +95,7 @@ async function retryCheck() {
       </div>
 
       <p v-if="actionError || updateStore.status === 'install-failed'" class="update-notice-error">
-        {{ actionError || updateStore.error || '安装更新失败，请重试。' }}
+        {{ actionError || updateStore.error || '更新失败，请重试。' }}
       </p>
 
       <footer class="update-notice-actions">
@@ -113,7 +113,7 @@ async function retryCheck() {
         </button>
         <button class="update-primary-button" type="button" :disabled="busy" @click="install">
           <Download v-if="!busy" :size="16" />
-          {{ busy ? '更新处理中' : '下载并安装' }}
+          {{ busy ? '更新处理中' : '更新并重启' }}
         </button>
       </footer>
     </section>

@@ -158,12 +158,14 @@ cargo test --locked
 客户端在启动、连接成功和每四小时通过 GitHub Releases 静默检查：
 
 ```text
-https://github.com/XiaoDoNiChannel/DoNiLivekit/releases/latest/download/latest.json
+https://github.com/XiaoDoNiChannel/DoNiLivekit/releases/latest/download/latest-portable.json
 ```
 
-有更新时客户端右下角显示版本、更新说明、下载进度和安装按钮，并直接从 GitHub 下载由 Tauri 私钥签名的安装包。若 GitHub 下载超时，界面会提示用户改从群文件下载安装包。
+客户端发布为免安装的 `DoNiChannel.exe`，用户下载后直接运行。电脑需要已安装 WebView2 Runtime，程序应放在当前用户有写权限的文件夹。设置继续保存在原用户数据目录，不随 EXE 移动。
 
-GitHub Actions 默认先创建 Draft Release。只有检查产物并点击 `Publish release` 后，`releases/latest` 才会指向新版本，客户端更新才会生效。中心服务器的 `Publish-LanUpdate.ps1` 仅保留给仍信任同一签名密钥、但尚未迁移到 GitHub 更新源的旧客户端过渡使用；签名密钥已经变化的旧客户端必须手动安装一次过渡版本。
+有更新时，点击“更新并重启”下载并验证新 EXE。临时更新助手等待程序退出，备份旧文件、替换 EXE 并重启；替换或启动失败时尝试恢复旧文件。GitHub 超时时，可从群文件下载新版 EXE，关闭程序后手动替换。
+
+GitHub Actions 生成 Draft Release，包含 `DoNiChannel.exe`、`DoNiChannel.exe.sig`、`latest-portable.json`。检查产物后点击 `Publish release` 才会启用自动更新。旧安装版（包括 0.1.4）需手动下载并运行首个免安装版一次，之后使用新的更新频道；不要向旧版 `latest.json` 发布普通 EXE。
 
 发布由 `.github/workflows/release.yml` 在 `v*.*.*` tag 上触发。创建 tag 前，必须把 `src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、根 `package.json` 和 `ui/package.json` 的版本同步；CI 会拒绝版本不一致的发布。仓库只保存 updater 公钥，私钥和密码必须配置为 GitHub Secrets：
 

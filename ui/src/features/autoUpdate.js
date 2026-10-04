@@ -13,6 +13,7 @@ export function createAutoUpdateFeature({
             return { skipped: true };
         }
 
+        if (installInFlight) return { skipped: true };
         if (checkInFlight) return checkInFlight;
 
         checkInFlight = (async () => {
@@ -56,6 +57,9 @@ export function createAutoUpdateFeature({
         if (installInFlight) return installInFlight;
 
         installInFlight = (async () => {
+            // Finish any silent check before entering the download state so it
+            // cannot overwrite progress while the replacement is prepared.
+            if (checkInFlight) await checkInFlight;
             patchState({
                 status: 'downloading',
                 error: null,

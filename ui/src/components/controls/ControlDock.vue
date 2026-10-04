@@ -1,9 +1,11 @@
 <script setup>
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
-import { Mic, MicOff, Headphones, Volume2, MonitorUp, Music2, SlidersHorizontal, PictureInPicture2, PhoneOff, ChevronUp, Settings2, X, Circle } from 'lucide-vue-next';
+import { Mic, MicOff, Headphones, Volume2, MonitorUp, Music2, SlidersHorizontal, PictureInPicture2, PhoneOff, ChevronUp, Settings2, X, Circle, Palette } from 'lucide-vue-next';
 import { appStore } from '../../stores/appStore.js';
 import { presenceStore } from '../../stores/presenceStore.js';
 import { overlayStore } from '../../stores/overlayStore.js';
+import { soundboardStore } from '../../stores/soundboardStore.js';
+import { Megaphone } from 'lucide-vue-next';
 import { isTauriClient } from '../../shared/tauri.js';
 const emit = defineEmits(['toggle-mic', 'toggle-monitor', 'toggle-screen', 'app-audio-click', 'leave', 'open-settings', 'switch-mic', 'switch-output', 'overlay-control', 'audio-gain', 'mic-setting']);
 const open = ref('');
@@ -42,12 +44,17 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
           <button @click="open = ''; emit('open-settings', 'devices')"><Settings2 :size="15" /> 更多音频设备设置</button>
         </section>
       </div>
+    </div>
+    <div class="call-actions call-share-actions" role="group" aria-label="共享">
       <div class="dock-control-group screen-control" :class="{ 'popup-open': open === 'screen' }">
         <button id="btn-screen" :disabled="!connected" :aria-pressed="appStore.media.screenOn" @click="emit('toggle-screen')"><MonitorUp :size="18" /><span>{{ appStore.media.screenOn ? '停止画面' : '屏幕共享' }}</span></button>
         <button class="dock-caret" aria-label="共享画质" :aria-expanded="open === 'screen'" @click="toggle('screen')"><ChevronUp :size="14" /></button>
         <section class="dock-popup screen-quick-popup" aria-label="共享画质"><strong>共享画质</strong><label>分辨率<select id="screen-res" :disabled="!connected || appStore.media.screenOn"><option value="1280x720">720P</option><option value="1920x1080" selected>1080P</option><option value="2560x1440">2K</option></select></label><label>帧率<select id="screen-fps" :disabled="!connected || appStore.media.screenOn"><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label><label>码率<select id="screen-bitrate" :disabled="!connected || appStore.media.screenOn"><option v-for="rate in [2500,5000,8000,15000,20000,25000,30000]" :key="rate" :value="rate" :selected="rate === 5000">{{ rate / 1000 }} Mbps</option></select></label><small>仅共享画面；程序声音单独开启。</small></section>
       </div>
       <button id="btn-app-audio" :disabled="!connected || !isTauriClient" :aria-pressed="appStore.media.appAudioSharing" @click="emit('app-audio-click')"><Music2 :size="18" /><span>{{ appStore.media.appAudioSharing ? '停止音频' : '程序音频' }}</span></button>
+    </div>
+    <div class="call-actions call-social-actions">
+      <button :aria-pressed="!!soundboardStore.playing" title="一键喊话：试听、音量与快捷键" @click="soundboardStore.open = true"><Megaphone :size="18" /><span>一键喊话</span></button>
     </div>
     <div class="call-tools">
       <div class="dock-control-group" :class="{ 'popup-open': open === 'audio' }"><button :aria-expanded="open === 'audio'" @click="toggle('audio')"><SlidersHorizontal :size="18" /><span>音频调节</span></button>
@@ -62,6 +69,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
         </section>
       </div>
       <div class="dock-control-group"><button :disabled="!overlayStore.available || overlayStore.busy" :aria-pressed="overlayStore.status.visible" @click="emit('overlay-control', 'toggle')"><PictureInPicture2 :size="18" /><span>浮窗</span></button><button class="dock-caret" aria-label="浮窗设置" @click="emit('open-settings', 'overlay')"><ChevronUp :size="14" /></button></div>
+      <button aria-label="外观设置" title="外观设置" @click="open = ''; emit('open-settings', 'appearance')"><Palette :size="18" /><span>外观</span></button>
       <button id="btn-leave" class="call-leave" :disabled="!connected && !appStore.connection.isInLobby" @click="emit('leave')"><PhoneOff :size="18" /><span>离开</span></button>
     </div>
     <p v-if="overlayStore.error" class="dock-error" role="status">{{ overlayStore.error }} <button @click="emit('open-settings', 'overlay')">查看浮窗设置</button></p>

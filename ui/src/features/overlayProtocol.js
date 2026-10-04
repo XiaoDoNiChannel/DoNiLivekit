@@ -1,6 +1,7 @@
+import { buildTeamPanel, validateTeamAction } from './overlayTeam.js';
 const text = (value, limit = 60) => Array.from(String(value || '')).slice(0, limit).join('');
 
-export function buildOverlaySnapshot({ app, presence, diagnostics, theme, session, connectionState }) {
+export function buildOverlaySnapshot({ app, presence, diagnostics, theme, session, connectionState, chat, sharing, chatConnected }) {
     const connected = connectionState === 'connected';
     const reconnecting = ['reconnecting', 'signalReconnecting'].includes(connectionState);
     const speaking = connected ? (presence.voiceMembers || []).filter(member => {
@@ -11,7 +12,8 @@ export function buildOverlaySnapshot({ app, presence, diagnostics, theme, sessio
     const channel = presence.channels?.find(item => item.id === app.connection.currentChannel || item.name === app.connection.currentChannel);
     return {
         session, connected, reconnecting,
-        channel: text(channel?.name || app.connection.currentChannel || '未加入频道'),
+        channel: text(channel?.displayName || channel?.name || app.connection.currentChannel || '未加入频道'),
+        panel: buildTeamPanel({ app: { ...app, connection: { ...app.connection, isConnected: connected } }, presence, diagnostics, chat, sharing, chatConnected }),
         micOn: connected && !!app.media.micOn,
         screenOn: connected && !!app.media.screenOn,
         appAudioOn: connected && !!app.media.appAudioSharing,
@@ -24,7 +26,7 @@ export function buildOverlaySnapshot({ app, presence, diagnostics, theme, sessio
 }
 
 /** Main webview owns all connections. This bridge forwards only serializable display state. */
-export function createOverlayOwner({ invoke, listen, getSnapshot, toggleMic, onError = () => {}, now = Date.now, schedule = setTimeout, unschedule = clearTimeout }) {
+export function createOverlayOwner({ invoke, listen, getSnapshot, toggleMic, sendChat, markRead, setVolume, onError = () => {}, now = Date.now, schedule = setTimeout, unschedule = clearTimeout }) {
     let running = false, disposed = false, publishing = false, dirty = false, timer = null, acting = false;
     const unlisteners = [];
     function changed() {
@@ -59,9 +61,27 @@ export function createOverlayOwner({ invoke, listen, getSnapshot, toggleMic, onE
             try { await invoke('overlay_mic_result', { id: request.id, error }); } catch (_) { /* Owner may be shutting down. */ }
         }
     }
+    async function handleAction(request) {
+        if (!running || !request || !Number.isSafeInteger(request.id)) return;
+        let error = null, ownsAction = false;
+        try {
+            if (acting) throw Error('浮窗操作尚未完成');
+            validateTeamAction(getSnapshot(), request, now());
+            acting = true; ownsAction = true;
+            if (request.kind === 'chat') {
+                if (!await sendChat(request.content, request.channelId)) throw Error('消息未发送，请在消息列表检查状态');
+            } else if (request.kind === 'read') await markRead(request.channelId);
+            else await setVolume(request.identity, request.source, request.value);
+            await publish();
+        } catch (reason) { error = String(reason?.message || reason); }
+        finally {
+            if (ownsAction) acting = false;
+            try { await invoke('overlay_action_result', { id: request.id, error }); } catch (_) { /* Owner closed. */ }
+        }
+    }
     async function start() {
         if (running || disposed) return;
-        for (const [event, handler] of [['overlay-poll', () => void publish()], ['overlay-mic-request', event => void handleMic(event.payload)]]) {
+        for (const [event, handler] of [['overlay-poll', () => void publish()], ['overlay-mic-request', event => void handleMic(event.payload)], ['overlay-action-request', event => void handleAction(event.payload)]]) {
             const unlisten = await listen(event, handler);
             if (disposed) { unlisten?.(); return; }
             unlisteners.push(unlisten);
@@ -70,7 +90,7 @@ export function createOverlayOwner({ invoke, listen, getSnapshot, toggleMic, onE
         await publish();
     }
     function dispose() { disposed = true; running = false; dirty = false; if (timer !== null) unschedule(timer); unlisteners.splice(0).forEach(fn => fn?.()); }
-    return { start, changed, publish, handleMic, dispose };
+    return { start, changed, publish, handleMic, handleAction, dispose };
 }
 
 export function acceptOverlayPacket(previous, next) {

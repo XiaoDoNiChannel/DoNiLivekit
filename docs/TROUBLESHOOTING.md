@@ -177,14 +177,14 @@ AudioContext.setSinkId 切换失败
 静默更新只有在 Tauri 客户端能够访问 GitHub Releases 时才执行。依次检查：
 
 ```text
-https://github.com/XiaoDoNiChannel/DoNiLivekit/releases/latest/download/latest.json
+https://github.com/XiaoDoNiChannel/DoNiLivekit/releases/latest/download/latest-portable.json
 目标 Release 是否已经 Publish（Draft 不可用）
-latest.json 是否包含 windows-x86_64 / windows-x86_64-nsis
-latest.json 引用的 GitHub Release asset 是否可下载
+latest-portable.json 是否包含 windows-x86_64-portable
+清单引用的 DoNiChannel.exe 是否可下载
 signature 是否由与 tauri.conf.json 公钥匹配的私钥生成
 ```
 
-当前版本已经等于 GitHub 最新版本时不会弹窗，这是正常行为。GitHub 网络不可达或超时时，客户端记录 `autoUpdate/check` 调试日志并继续进入主界面，用户可从群文件手动下载安装包。
+当前版本已经等于 GitHub 最新版本时不会弹窗，这是正常行为。GitHub 网络不可达或超时时，客户端记录 `autoUpdate/check` 调试日志并继续进入主界面，用户可从群文件下载 EXE，关闭程序后手动替换。0.1.4 及此前安装版需先手动迁移到免安装版，旧更新频道不会提供普通 EXE。
 
 签名校验始终强制启用。不要通过删除公钥或关闭验证来“修复”更新。
 

@@ -1,9 +1,9 @@
 use serde::Serialize;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, WebviewWindow};
 use tauri_plugin_updater::UpdaterExt;
 
 #[derive(Debug, Serialize)]
@@ -26,6 +26,8 @@ struct UpdateDownloadProgress {
 
 fn updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     app.updater_builder()
+        .target("windows-x86_64-portable")
+        .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|error| format!("初始化 GitHub 更新器失败: {error}"))
 }
@@ -57,23 +59,37 @@ pub(crate) async fn check_for_update(app: AppHandle) -> Result<UpdateCheckResult
 }
 
 #[tauri::command]
-pub(crate) async fn install_update(app: AppHandle) -> Result<bool, String> {
-    let Some(update) = updater(&app)?
+pub(crate) async fn install_update(app: AppHandle, window: WebviewWindow) -> Result<bool, String> {
+    if window.label() != "main" {
+        return Err("只能从主窗口发起更新".into());
+    }
+    static INSTALLING: AtomicBool = AtomicBool::new(false);
+    if INSTALLING.swap(true, Ordering::AcqRel) {
+        return Err("更新正在进行中".into());
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            INSTALLING.store(false, Ordering::Release);
+        }
+    }
+    let _reset = Reset;
+    let Some(mut update) = updater(&app)?
         .check()
         .await
         .map_err(|error| format!("检查更新失败: {error}"))?
     else {
         return Ok(false);
     };
+    // The plugin's check timeout is not carried over to the returned download.
+    update.timeout = Some(std::time::Duration::from_secs(180));
 
     let progress_app = app.clone();
-    let installing_app = app.clone();
     let downloaded_bytes = Arc::new(AtomicU64::new(0));
     let progress_downloaded_bytes = Arc::clone(&downloaded_bytes);
-    let installing_downloaded_bytes = Arc::clone(&downloaded_bytes);
 
-    update
-        .download_and_install(
+    let bytes = update
+        .download(
             move |chunk_length, content_length| {
                 let downloaded_bytes = progress_downloaded_bytes
                     .fetch_add(chunk_length as u64, Ordering::Relaxed)
@@ -97,21 +113,25 @@ pub(crate) async fn install_update(app: AppHandle) -> Result<bool, String> {
                     content_length
                 );
             },
-            move || {
-                let downloaded_bytes = installing_downloaded_bytes.load(Ordering::Relaxed);
-                let _ = installing_app.emit(
-                    "update-download-progress",
-                    UpdateDownloadProgress {
-                        phase: "installing",
-                        downloaded_bytes,
-                        total_bytes: Some(downloaded_bytes),
-                        progress_percent: Some(100.0),
-                    },
-                );
-                log::info!(target: "donichannel::updater", "download complete; installing");
-            },
+            || {},
         )
         .await
-        .map_err(|error| format!("下载或安装更新失败: {error}"))?;
+        .map_err(|error| format!("下载或验证更新失败: {error}"))?;
+    let total = bytes.len() as u64;
+    let _ = app.emit(
+        "update-download-progress",
+        UpdateDownloadProgress {
+            phase: "installing",
+            downloaded_bytes: total,
+            total_bytes: Some(total),
+            progress_percent: Some(100.0),
+        },
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::portable_update::prepare(bytes, update.signature)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    app.exit(0);
     Ok(true)
 }

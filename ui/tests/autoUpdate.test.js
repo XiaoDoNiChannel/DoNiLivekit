@@ -100,3 +100,32 @@ test('安装更新直接使用 Tauri 配置的 GitHub endpoint', async () => {
     assert.deepEqual(calls, [['install_update']]);
     assert.equal(state.status, 'installed');
 });
+
+test('后台检查不会覆盖更新进度，重复更新只执行一次', async () => {
+    const state = createUpdateState();
+    const calls = [];
+    let resolveCheck;
+    let resolveInstall;
+    const feature = createAutoUpdateFeature({
+        invoke: (command) => {
+            calls.push(command);
+            return new Promise((resolve) => {
+                if (command === 'check_for_update') resolveCheck = resolve;
+                else resolveInstall = resolve;
+            });
+        },
+        isTauriClient: true,
+        patchState: (values) => Object.assign(state, values),
+    });
+    const check = feature.checkSilently();
+    const install = feature.installAvailable();
+    const duplicate = feature.installAvailable();
+    resolveCheck({ available: true, version: '0.1.6' });
+    await check;
+    await Promise.resolve();
+    assert.equal(state.status, 'downloading');
+    assert.deepEqual(await feature.checkSilently(), { skipped: true });
+    assert.deepEqual(calls, ['check_for_update', 'install_update']);
+    resolveInstall(true);
+    assert.deepEqual(await Promise.all([install, duplicate]), [true, true]);
+});

@@ -4,18 +4,32 @@ export function publicationKind(pub, track = pub?.track) {
     if (source === 'screen_share' && pub?.kind !== 'audio') return 'screen';
     const names = [pub?.trackName, pub?.name, track?.name, track?.mediaStreamTrack?.label]
         .filter(Boolean).join('|').toLowerCase().replace(/[\s_]+/g, '-');
+    if (names.split('|').some(name => name === 'soundboard' || name.startsWith('soundboard:'))) return 'soundboard';
     if (['app-audio', 'appaudio', 'application-audio', 'process-audio', 'system-audio', 'window-audio'].some(n => names.includes(n))) return 'appaudio';
     // Old clients' native display audio must never be mistaken for microphone audio.
     if (source === 'screen_share_audio') return 'unsupported';
     return pub?.kind === 'audio' || track?.kind === 'audio' ? 'mic' : 'unsupported';
 }
 
-export function createShareSubscriptions({ store, onError = () => {}, onWanted = () => {}, now = Date.now }) {
+export function createShareSubscriptions({ store, onError = () => {}, onWanted = () => {}, now = Date.now,
+    allowSoundboard = () => true, onSoundboardsChanged = () => {} }) {
     let room = null;
     let reconnecting = false;
     const entries = new Map();
     const seen = new Set();
     const timers = new Map();
+    const soundboards = new Map();
+    function publishSoundboards() {
+        onSoundboardsChanged([...new Map([...soundboards.values()].map(({ participant }) =>
+            [participant.identity, { identity: participant.identity, name: participant.name || participant.identity }])).values()]);
+    }
+    function syncSoundboards() {
+        for (const { pub, participant } of soundboards.values()) {
+            const wanted = allowSoundboard(participant.identity);
+            onWanted(pub.trackSid, wanted);
+            try { pub.setSubscribed(wanted); } catch (error) { onError(error); }
+        }
+    }
     const idFor = (pub, participant) => `${participant.identity}:${pub.trackSid || pub.sid}`;
     const signature = (pub, participant) => `${participant.identity}:${publicationKind(pub)}:${pub.trackName || pub.name || ''}`;
 
@@ -49,6 +63,11 @@ export function createShareSubscriptions({ store, onError = () => {}, onWanted =
         restored = restored || reconnecting;
         if (!pub || !participant || participant.identity === room?.localParticipant?.identity) return;
         const kind = publicationKind(pub);
+        if (kind === 'soundboard') {
+            soundboards.set(idFor(pub, participant), { pub, participant });
+            const wanted = allowSoundboard(participant.identity);
+            onWanted(pub.trackSid, wanted); pub.setSubscribed(wanted); publishSoundboards(); return;
+        }
         if (kind === 'mic') { pub.setSubscribed(true); return; }
         if (kind === 'unsupported') { pub.setSubscribed(false); return; }
         const id = idFor(pub, participant);
@@ -78,6 +97,7 @@ export function createShareSubscriptions({ store, onError = () => {}, onWanted =
     function remove(pub, participant) {
         if (reconnecting) return;
         const id = idFor(pub, participant);
+        if (soundboards.delete(id)) { publishSoundboards(); return; }
         const entry = entries.get(id);
         if (!entry) return;
         if (store.watchingId === id) {
@@ -93,8 +113,12 @@ export function createShareSubscriptions({ store, onError = () => {}, onWanted =
         for (const entry of [...entries.values()]) {
             if (!currentIds.has(entry.id)) remove(entry.pub, entry.participant);
         }
+        for (const [id, entry] of soundboards) if (!currentIds.has(id)) soundboards.delete(id);
+        publishSoundboards();
     }
     function reset() {
+        for (const { pub } of soundboards.values()) { try { pub.setSubscribed(false); } catch {} }
+        soundboards.clear(); publishSoundboards();
         entries.forEach(entry => { try { entry.pub.setSubscribed(false); } catch (_) {} });
         entries.clear(); seen.clear(); timers.forEach(clearTimeout); timers.clear();
         Object.assign(store, { shares: [], notices: [], watchingId: '', view: 'chat', endedName: '', error: '' });
@@ -122,6 +146,7 @@ export function createShareSubscriptions({ store, onError = () => {}, onWanted =
         request(entry, !entry.wanted); dismiss(id); publish();
     }
     function allowTrack(pub, participant, track) {
+        if (publicationKind(pub, track) === 'soundboard') return allowSoundboard(participant.identity);
         if (publicationKind(pub, track) === 'mic') return true;
         return !!entries.get(idFor(pub, participant))?.wanted;
     }
@@ -131,6 +156,8 @@ export function createShareSubscriptions({ store, onError = () => {}, onWanted =
     }
     function participantLeft(participant) {
         if (reconnecting) return;
+        for (const [id, entry] of soundboards) if (entry.participant.identity === participant.identity) soundboards.delete(id);
+        publishSoundboards();
         for (const entry of [...entries.values()]) if (entry.identity === participant.identity) remove(entry.pub, participant);
     }
     function failed(sid) {
@@ -140,7 +167,7 @@ export function createShareSubscriptions({ store, onError = () => {}, onWanted =
         store.error = `${entry.kind === 'screen' ? '观看' : '收听'}连接失败，请重试`;
         publish();
     }
-    return { attach, reset, discover, remove, sync, watchScreen, stopWatching, toggleListening,
+    return { attach, reset, discover, remove, sync, syncSoundboards, watchScreen, stopWatching, toggleListening,
         allowTrack, subscribed, participantLeft, failed, dismiss,
         backToChat: () => { store.view = 'chat'; },
         isCurrentRoom: value => room === value,
